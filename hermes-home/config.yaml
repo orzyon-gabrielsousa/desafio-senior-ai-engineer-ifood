@@ -1,0 +1,90 @@
+# =============================================================================
+# Hermes Agent — configuração do Sabor da Maria
+# Este arquivo é o $HERMES_HOME/config.yaml montado no container (./hermes-home).
+# Chaves não listadas usam o padrão do Hermes (cli-config.yaml.example upstream).
+# =============================================================================
+
+# ---------------------------------------------------------------- plugins
+# Plugins de usuário são opt-in no Hermes: só os listados em plugins.enabled carregam.
+plugins:
+  enabled: [sabor_da_maria]
+
+# ---------------------------------------------------------------- modelo local
+# Qualquer servidor OpenAI-compatible com tool calling nativo serve. O padrão é o
+# llama.cpp do docker-compose (serviço "inference", perfil llamacpp). Para o perfil
+# MAX, troque default para "Qwen/Qwen3.5-4B" e streaming para false (ver README).
+model:
+  default: "qwen3-8b"
+  provider: "custom"
+  base_url: "http://inference:8000/v1"
+  api_key: "local"
+  # O Hermes recusa modelos com menos de 64k de contexto. O llama.cpp sobe com
+  # --ctx-size 65536; declaramos aqui para não depender da autodetecção.
+  context_length: 65536
+  streaming: true
+
+agent:
+  # A consultoria é conversacional: 40 iterações de tool por turno é folga suficiente
+  # e evita loops longos num modelo de 8B.
+  max_turns: 40
+  tool_use_enforcement: "auto"
+
+# ---------------------------------------------------------------- web (busca + extração)
+# Busca: SearXNG local (container "searxng"), via SEARXNG_URL no ambiente.
+# Extração: provider "receitas-local" do plugin sabor_da_maria (urllib + schema.org/Recipe).
+# keyless_fallback/rescue desligados: nenhuma chamada sai para SaaS (Exa, Parallel, Firecrawl...).
+web:
+  search_backend: "searxng"
+  extract_backend: "receitas-local"
+  keyless_fallback: false
+  keyless_rescue: false
+  cache_enabled: true
+  cache_ttl_minutes: 60
+  extract_char_limit: 15000
+
+security:
+  # web_extract só sai para a internet pública; o SearXNG é chamado pelo próprio
+  # provider (não passa por aqui), então o guarda anti-SSRF fica ligado.
+  allow_private_urls: false
+
+# ---------------------------------------------------------------- tools disponíveis
+# Toolset enxuto de propósito: um modelo de 8B acerta mais com ~17 tools do que com
+# as ~40 do bundle hermes-cli (terminal, arquivos, browser, cron, imagem...).
+#   web      -> web_search, web_extract
+#   clarify  -> perguntas de múltipla escolha para a elicitação (2.2)
+#   memory   -> MEMORY.md / USER.md persistentes entre sessões
+#   skills   -> skills_list, skill_view, skill_manage (playbook consultoria-cardapio)
+#   todo     -> todo_list para acompanhar o fluxo
+#   sabor_da_maria -> as 10 tools do plugin
+tools:
+  # Por padrão o Hermes esconde as tools de plugin atrás de um meta-tool `tool_search`
+  # (o modelo precisa "procurar" a tool antes de usá-la). Com 10 tools de domínio e um
+  # modelo de 8B isso faz ele cair em web_search para perguntas da despensa. Com o
+  # toolset enxuto abaixo (~18 tools, ~14 KB de schema) cabe tudo no prompt: desligado.
+  tool_search:
+    enabled: "off"
+
+platform_toolsets:
+  cli: [web, clarify, memory, skills, todo, sabor_da_maria]
+  # Mesmo conjunto para o API server (porta 8642), sem clarify (o endpoint HTTP não
+  # tem UI interativa) e sem terminal/arquivos: nada roda no host via HTTP.
+  api_server: [web, memory, skills, todo, sabor_da_maria]
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  nudge_interval: 6
+
+# ---------------------------------------------------------------- interfaces opcionais
+# API server OpenAI-compatible do gateway (porta 8642) é ligado por variáveis de
+# ambiente no docker-compose (API_SERVER_ENABLED/KEY/CORS). O webapp (chat no
+# navegador, porta 9120) exige um provedor de login; ligue aqui e defina
+# HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD no .env se quiser usar.
+webapp:
+  enabled: false
+  host: 0.0.0.0
+  port: 9120
+  public_url: "http://localhost:9120"
+_config_version: 53

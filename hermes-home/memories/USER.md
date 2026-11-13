@@ -1,0 +1,1 @@
+Dona Maria: cozinheira de mão cheia abrindo o primeiro delivery, o Sabor da Maria. Fala português do Brasil. Equipamentos, técnicas, restrições operacionais e preferências de cozinha ainda não informados: perguntar antes de aprovar qualquer prato.

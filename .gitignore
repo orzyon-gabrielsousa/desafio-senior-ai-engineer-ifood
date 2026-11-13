@@ -1,0 +1,38 @@
+# segredos / ambiente local
+.env
+
+# modelos (GB): baixe com `make model`
+models/*
+!models/.gitkeep
+
+# hermes-home/ é o $HERMES_HOME montado no container. O Hermes cria dezenas de
+# arquivos de runtime ali (state.db, sessions, logs, cache, .env gerado, skills
+# embutidas sincronizadas...). Só a customização é versionada: lista branca abaixo.
+hermes-home/*
+!hermes-home/config.yaml
+!hermes-home/SOUL.md
+!hermes-home/.no-bundled-skills
+!hermes-home/plugins/
+hermes-home/plugins/*
+!hermes-home/plugins/sabor_da_maria/
+hermes-home/plugins/sabor_da_maria/**/__pycache__/
+!hermes-home/skills/
+hermes-home/skills/*
+!hermes-home/skills/sabor-da-maria/
+!hermes-home/memories/
+hermes-home/memories/*
+!hermes-home/memories/MEMORY.md
+!hermes-home/memories/USER.md
+!hermes-home/workspace/
+hermes-home/workspace/*
+!hermes-home/workspace/AGENTS.md
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editores / SO
+.idea/
+.vscode/
+.DS_Store

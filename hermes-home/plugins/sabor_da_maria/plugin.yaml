@@ -1,0 +1,25 @@
+name: sabor_da_maria
+version: 1.0.0
+description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
+author: "Gabriel Sousa"
+license: MIT
+tags: [cozinha, precificacao, cmv, delivery, ifood]
+provides_tools:
+  - despensa_listar
+  - despensa_buscar
+  - despensa_atualizar
+  - perfil_cozinha_consultar
+  - perfil_cozinha_salvar
+  - receita_conferir_ingredientes
+  - prato_calcular_cmv
+  - preco_sugerir
+  - cardapio_registrar
+  - cardapio_consultar
+provides_web_providers:
+  - receitas-local
+optional_env:
+  - SABOR_DA_MARIA_XLSX
+  - SABOR_DA_MARIA_DB
+  - SABOR_DA_MARIA_ORCAMENTO
+# Sem dependências Python: só stdlib (sqlite3, zipfile, urllib, html.parser).
+python_dependencies: []

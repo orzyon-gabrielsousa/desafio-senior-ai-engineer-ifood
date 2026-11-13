@@ -1,0 +1,161 @@
+# =============================================================================
+# Sabor da Maria — stack 100% local
+#
+#   inference-llamacpp  (perfil "llamacpp", padrão)  llama.cpp + Qwen3-8B GGUF, GPU, porta 8000
+#   inference-max       (perfil "max", experimental) Modular MAX + Qwen3.5-4B,  GPU, porta 8000
+#   searxng             metabuscador local (web_search do Hermes), porta 8888
+#   hermes              Hermes Agent (gateway + API server + TUI via exec),   porta 8642
+#
+# Os dois motores de inferência respondem pelo alias de rede "inference"; o Hermes
+# aponta para http://inference:8000/v1. Escolha o motor com COMPOSE_PROFILES no .env
+# (padrão: llamacpp). Nunca suba os dois ao mesmo tempo (uma GPU, mesma porta).
+# =============================================================================
+name: sabor-da-maria
+
+services:
+  inference-llamacpp:
+    profiles: ["llamacpp"]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
+    container_name: sabor-inference
+    restart: unless-stopped
+    networks:
+      default:
+        aliases: [inference]
+    ports:
+      # Dentro da rede do compose é sempre inference:8000; no host a porta é configurável
+      # (8000 costuma estar ocupada por outros projetos).
+      - "127.0.0.1:${INFERENCE_HOST_PORT:-8010}:8000"
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Qwen3 em modo não-pensante (reasoning budget 0): tool calling nativo via --jinja.
+    # O Hermes exige >= 64k de contexto e o Qwen3-8B foi treinado com 40 960, então o
+    # contexto é estendido para 65 536 com YaRN (fator 2 sobre 32 768, como a Qwen
+    # recomenda). KV cache quantizado (K q8_0, V q4_0) para caber nos 16 GB da
+    # RTX 5070 Ti junto com o desktop. Amostragem recomendada pela Qwen.
+    command: >
+      --model /models/${LLAMA_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}
+      --alias ${MODEL_NAME:-qwen3-8b}
+      --host 0.0.0.0 --port 8000
+      --ctx-size ${LLAMA_CTX:-65536}
+      --rope-scaling yarn --rope-scale ${LLAMA_ROPE_SCALE:-2} --yarn-orig-ctx 32768
+      --n-gpu-layers 999
+      --flash-attn on
+      --cache-type-k q8_0 --cache-type-v ${LLAMA_KV_V_TYPE:-q4_0}
+      --parallel 1
+      --jinja
+      --reasoning-budget ${LLAMA_REASONING_BUDGET:-0}
+      --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0
+      --metrics
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  inference-max:
+    profiles: ["max"]
+    image: modular/max-nvidia-full:${MAX_VERSION:-26.7.0}
+    container_name: sabor-inference-max
+    restart: unless-stopped
+    networks:
+      default:
+        aliases: [inference]
+    ports:
+      - "127.0.0.1:${INFERENCE_HOST_PORT:-8010}:8000"
+    volumes:
+      - ./models/hf:/root/.cache/huggingface
+    environment:
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Experimental na RTX 50 (sm_120): ver inference/max/README.md. Só o Qwen3.5-4B
+    # tem parser de tool calling no MAX; sem streaming com function calling.
+    # O entrypoint da imagem já é `max serve`; aqui vão só os argumentos.
+    command: >
+      --model ${MAX_MODEL:-Qwen/Qwen3.5-4B}
+      --port 8000
+      --max-length ${LLAMA_CTX:-65536}
+      --max-batch-size ${MAX_BATCH_SIZE:-1}
+      --allow-extra-request-fields
+      --device-memory-utilization ${MAX_DEVICE_MEMORY:-0.95}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/health || curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 60
+      start_period: 180s
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: sabor-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8888/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-troque-este-segredo-local}
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:8080/healthz' >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  hermes:
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.23.1}
+    container_name: sabor-hermes
+    restart: unless-stopped
+    depends_on:
+      searxng:
+        condition: service_started
+    # Diretório de trabalho = workspace com o AGENTS.md do projeto (contexto carregado
+    # pelo Hermes). `docker compose exec hermes hermes` abre a TUI já nesse diretório.
+    working_dir: /opt/data/workspace
+    stdin_open: true
+    tty: true
+    ports:
+      - "127.0.0.1:8642:8642"
+      - "127.0.0.1:9120:9120"
+    volumes:
+      # $HERMES_HOME inteiro versionado no repositório (config, SOUL, plugin, skills, memórias);
+      # o estado de runtime (state.db, sessions, logs, cache) está no .gitignore.
+      - ./hermes-home:/opt/data
+      # Planilha da Dona Maria (entrada do desafio), somente leitura.
+      - ./data:/opt/data/sabor_da_maria/entrada:ro
+    environment:
+      # Arquivos criados pelo container ficam com o seu usuário do host.
+      HERMES_UID: ${HERMES_UID:-1000}
+      HERMES_GID: ${HERMES_GID:-1000}
+      # Busca local.
+      SEARXNG_URL: http://searxng:8080
+      # Plugin sabor_da_maria.
+      SABOR_DA_MARIA_XLSX: /opt/data/sabor_da_maria/entrada/despensa_dona_maria.xlsx
+      SABOR_DA_MARIA_DB: /opt/data/sabor_da_maria/sabor_da_maria.db
+      SABOR_DA_MARIA_ORCAMENTO: "${SABOR_DA_MARIA_ORCAMENTO:-80}"
+      # API server OpenAI-compatible (http://localhost:8642/v1/chat/completions) para um
+      # frontend próprio; a chave é local e o bind é só no loopback do host.
+      API_SERVER_ENABLED: "${API_SERVER_ENABLED:-true}"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_KEY: ${API_SERVER_KEY:-sabor-da-maria-chave-local}
+      API_SERVER_CORS_ORIGINS: ${API_SERVER_CORS_ORIGINS:-http://localhost:3000}
+      # Webapp/dashboard (opcionais) exigem login básico quando ligados.
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}
+    command: ["gateway", "run"]
