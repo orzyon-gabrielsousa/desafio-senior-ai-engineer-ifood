@@ -1,6 +1,6 @@
 name: sabor_da_maria
-version: 1.0.0
-description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
+version: 1.1.0
+description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Travas no backend: CMV, preço e registro recusam prato com pendência; o aceite reserva estoque e compromete orçamento numa transação só. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
 author: "Gabriel Sousa"
 license: MIT
 tags: [cozinha, precificacao, cmv, delivery, ifood]
@@ -14,6 +14,7 @@ provides_tools:
   - prato_calcular_cmv
   - preco_sugerir
   - cardapio_registrar
+  - cardapio_remover
   - cardapio_consultar
 provides_web_providers:
   - receitas-local

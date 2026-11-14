@@ -18,7 +18,7 @@ Tudo roda **localmente, em Docker, sem nenhuma chave de API**: modelo de linguag
 │                            │   ├ workspace/AGENTS.md  regras do negócio   │  │
 │                            │   ├ skills/…/consultoria-cardapio  playbook  │  │
 │                            │   ├ memories/        MEMORY.md + USER.md     │  │
-│                            │   ├ plugins/sabor_da_maria  10 tools + extrator │
+│                            │   ├ plugins/sabor_da_maria  11 tools + extrator │
 │                            │   └ sabor_da_maria/sabor_da_maria.db (SQLite)│  │
 │                            └───────┬───────────────────┬──────────────────┘  │
 │                        OpenAI API  │                   │ /search?format=json │
@@ -38,7 +38,7 @@ Tudo roda **localmente, em Docker, sem nenhuma chave de API**: modelo de linguag
 | **SOUL.md** | identidade e tom da consultora | sempre no prompt (slot 1) |
 | **AGENTS.md** | regras do negócio, fluxo e "regras de ouro" | contexto do projeto carregado da pasta de trabalho |
 | **Skill `consultoria-cardapio`** | playbook passo a passo com exemplos de chamadas | pré-carregada em `make chat`, consultável via `skill_view` |
-| **Plugin `sabor_da_maria`** | 10 tools (despensa, perfil, conferência, CMV, preço, cardápio) + provider `receitas-local` de `web_extract` | lógica determinística fora do modelo; só stdlib |
+| **Plugin `sabor_da_maria`** | 11 tools (despensa, perfil, conferência, CMV, preço, cardápio, remoção) + provider `receitas-local` de `web_extract` | lógica determinística e travas fora do modelo; só stdlib |
 | **SQLite** | despensa normalizada, perfil da cozinha, receitas, pratos, compras | banco embutido, persistente entre sessões |
 | **llama.cpp + Qwen3-8B** | servidor OpenAI-compatible com `tool_calls` nativos, 64k de contexto | roda na RTX 5070 Ti com folga; MAX fica como perfil experimental |
 | **SearXNG** | busca web local, JSON, pt-BR | zero chaves, zero SaaS |
@@ -51,9 +51,11 @@ Tudo roda **localmente, em Docker, sem nenhuma chave de API**: modelo de linguag
 | **2.1 Pesquisa de receitas** | `web_search` (SearXNG) + `web_extract` (provider `receitas-local`) | o extrator lê schema.org/Recipe (JSON-LD) e devolve ingredientes, rendimento, tempo e passos; sem JSON-LD, cai para o texto do `<article>` |
 | **2.2 Elicitação de restrições** | `perfil_cozinha_consultar` → `clarify` → `perfil_cozinha_salvar` | o plugin mantém um checklist (bocas do fogão, forno, pressão, air fryer, liquidificador, geladeira, tempo, gás, energia, técnicas); o que falta vira pergunta com opções; técnicas específicas da receita entram em `tecnicas_necessarias` |
 | **2.3 Ingredientes** | `despensa_buscar`, `receita_conferir_ingredientes`, `despensa_atualizar` | casamento aproximado com sinônimos (cheiro-verde→salsinha, fubá→polenta...), conversão de medidas caseiras (colher, xícara, dente, "1 cebola média") com premissas explícitas, o que tem / falta / custo / cabe no orçamento, veredito `viavel` · `precisa_confirmar` · `inviavel_por_enquanto` |
-| **2.4 CMV e preço** | `prato_calcular_cmv` → `preco_sugerir` → `cardapio_registrar` | CMV = Σ quantidade usada × custo unitário (preço pago ÷ quantidade comprada, abas cruzadas), incluindo compras complementares, com memória de cálculo linha a linha; preço mínimo = CMV ÷ 0,90; 3 cenários de margem com a conta aberta e simulação de preços que ela sugerir; o registro só acontece com o preço escolhido por ela |
+| **2.4 CMV e preço** | `prato_calcular_cmv` → `preco_sugerir` → `cardapio_registrar` | CMV = Σ quantidade usada × custo unitário (preço pago ÷ quantidade comprada, abas cruzadas), incluindo compras complementares, com memória de cálculo linha a linha; preço mínimo = CMV ÷ 0,90; 3 cenários de margem com a conta aberta e simulação de preços que ela sugerir; o registro só acontece com o preço escolhido por ela. As três tools recusam (`bloqueado: true` + `bloqueios`) enquanto houver requisito sem resposta; o registro reserva o estoque e abate o orçamento numa operação só |
 
 Detalhes que a planilha esconde e o plugin trata: unidades compostas (`balde 2kg`, `un 500g`, `un 500ml`) normalizadas para kg/L; a **cobertura de chocolate** vem como `1 un` sem peso, então a tool sinaliza e o agente pergunta o peso do pote antes de usar em receita medida em gramas.
+
+**Travas no backend.** O veredito da conferência (`viavel` · `precisa_confirmar` · `inviavel_por_enquanto`) não é só aviso: `prato_calcular_cmv`, `preco_sugerir` e `cardapio_registrar` recusam com `bloqueado: true` e a lista de `bloqueios` (forno não informado, técnica que ela disse não dominar, ingrediente sem preço, compra que não cabe nos R$ 80) enquanto o estado salvo não estiver `viavel`, mesmo que o modelo escreva na conversa que está tudo certo. O registro reavalia tudo contra o estado atual, recusa se CMV ou compras mudaram desde a apresentação (o preço foi escolhido em cima de outros números) e, quando aceita, reserva na despensa o que o prato usa e compromete as compras no orçamento numa transação só. Candidatas não consomem estoque; o segundo prato enxerga `disponivel = estoque − reservas`. Repetir o registro não duplica nada; `cardapio_remover` libera reserva e orçamento.
 
 ## Rodando
 
@@ -67,7 +69,7 @@ make smoke     # smoke test ponta a ponta (tool calling, busca, plugin, resposta
 make chat      # TUI do Hermes com o playbook pré-carregado — a demo
 ```
 
-Outros atalhos: `make ask Q="..."` (pergunta única), `make validate` (`hermes plugins validate`, toolsets, tamanho do prompt), `make test` (26 testes unitários do plugin, só stdlib), `make reset-dados` (zera perfil/cardápio), `make logs`, `make down`.
+Outros atalhos: `make ask Q="..."` (pergunta única), `make validate` (`hermes plugins validate`, toolsets, tamanho do prompt), `make test` (32 testes unitários do plugin, só stdlib), `make reset-dados` (zera perfil/cardápio), `make logs`, `make down`.
 
 Primeira subida: o llama.cpp leva ~30 s para carregar o modelo; o Hermes inicia o gateway (API server em `http://localhost:8642`, chave `API_SERVER_KEY` do `.env`).
 
@@ -77,7 +79,7 @@ Primeira subida: o llama.cpp leva ~30 s para carregar o modelo; o Hermes inicia 
 2. "Gosto de fazer frango e carne moída, para marmita." → busca receitas reais, extrai e apresenta 2–3 com fonte; pede feedback.
 3. Escolhida a receita, o agente abre o `clarify`: bocas do fogão, forno, pressão, air fryer, liquidificador, geladeira, tempo, gás, energia; depois técnicas da receita.
 4. Conferência de ingredientes: o que ela tem, o que falta, custo, cabe nos R$ 80? Se um item é vendido por unidade sem peso, ele pergunta.
-5. Aceite → CMV com memória de cálculo → preço mínimo e 3 cenários → ela escolhe → cardápio registrado e orçamento abatido.
+5. Aceite → CMV com memória de cálculo → preço mínimo e 3 cenários → ela escolhe → cardápio registrado, estoque reservado e orçamento abatido. Se o agente tentar pular a elicitação, a tool recusa e devolve o que falta perguntar.
 6. Fechar com `cardapio_consultar` e mostrar que a memória guardou equipamentos e decisões (nova sessão já sabe).
 
 ## Estrutura do repositório
@@ -95,16 +97,16 @@ Primeira subida: o llama.cpp leva ~30 s para carregar o modelo; o Hermes inicia 
 │   ├── skills/sabor-da-maria/consultoria-cardapio/SKILL.md
 │   ├── memories/MEMORY.md, USER.md   sementes de memória
 │   └── plugins/sabor_da_maria/
-│       ├── plugin.yaml       manifesto (10 tools, 1 web provider, zero dependências)
+│       ├── plugin.yaml       manifesto (11 tools, 1 web provider, zero dependências)
 │       ├── __init__.py       register(ctx)
-│       ├── tools.py          handlers + schemas (OpenAI function format)
-│       ├── store.py          SQLite (despensa, perfil, receitas, pratos, compras)
+│       ├── tools.py          handlers, travas (veredito único) + schemas (OpenAI function format)
+│       ├── store.py          SQLite (despensa, perfil, receitas, pratos, compras, reservas)
 │       ├── xlsx_reader.py    leitor .xlsx em stdlib
 │       ├── units.py          unidades da planilha + medidas caseiras + densidades
 │       ├── matching.py       sinônimos + casamento aproximado
 │       ├── costing.py        CMV, preço mínimo, cenários, simulação
 │       ├── extract.py        provider receitas-local (urllib + JSON-LD Recipe + texto)
-│       └── tests/            26 testes (unittest)
+│       └── tests/            32 testes (unittest)
 ├── searxng/settings.yml      JSON ligado, pt-BR, engines barulhentos removidos
 ├── inference/llamacpp/README.md · inference/max/README.md
 ├── scripts/smoke_test.sh
@@ -144,14 +146,15 @@ Para mais qualidade com a GPU livre: `LLAMA_MODEL_FILE=Qwen3-8B-Q6_K.gguf` no `.
 ## Testes e validação
 
 ```bash
-make test        # 26 testes: leitor xlsx, unidades/conversões, casamento, SQLite, CMV/preço, fluxo das tools, extrator
+make test        # 32 testes: leitor xlsx, unidades/conversões, casamento, SQLite, CMV/preço, fluxo das tools, travas (perfil pendente, forno ausente, orçamento estourado, números mudados), reservas/retry/remoção, extrator
 make validate    # hermes plugins validate (manifesto, registros, colisões, security scan) + toolsets + prompt-size
 make smoke       # /health, tool_calls nativos, SearXNG JSON, plugin habilitado, resposta do agente com a despensa
 ```
 
 ## Limitações conhecidas
 
-- Um modelo de 8B às vezes afirma o que a Dona Maria "já tem" antes de conferir; as regras em `AGENTS.md` e o veredito das tools reduzem isso, mas na demo vale pedir "confere na despensa".
+- Um modelo de 8B às vezes afirma o que a Dona Maria "já tem" antes de conferir; as travas das tools impedem que isso vire CMV, preço ou prato no cardápio, mas o texto da conversa ainda pode adiantar uma conclusão. Na demo vale pedir "confere na despensa".
+- O código não distingue compra real de compra inventada. Numa prova com o modelo real, mandado "registrar sem perguntar", o Qwen3-8B tentou destravar pendências de preço lançando compras fictícias com `despensa_atualizar`; a trava segurou (nada entrou no cardápio) e `AGENTS.md` e a skill agora proíbem usar a tool para isso, mas é regra de prompt, não de backend.
 - Conversões de medidas caseiras são estimativas (densidade, peso de "1 cebola"); a tool marca cada uma e o agente deve repassar as que pesam no custo.
 - O SearXNG depende de buscadores públicos; se um engine bloquear, os outros cobrem. Sem internet não há pesquisa de receitas.
 - A tool `clarify` é da TUI; via API server (8642) a elicitação acontece em texto.

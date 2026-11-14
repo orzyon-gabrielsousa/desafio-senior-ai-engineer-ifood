@@ -7,8 +7,13 @@ do Hermes e sobrevive entre sessões. Tabelas:
 * ``perfil``        — equipamentos, técnicas e restrições operacionais elicitadas
 * ``receitas``      — candidatas conferidas (ingredientes, origem, pendências)
 * ``pratos``        — CMV calculado e, quando aceito, preço escolhido
-* ``compras``       — compras complementares planejadas/confirmadas (orçamento)
+* ``compras``       — compras complementares planejadas/confirmadas/canceladas (orçamento)
+* ``reservas``      — estoque da despensa reservado por prato aceito (disponível = estoque − reservas)
 * ``config``        — orçamento inicial e origem da planilha
+
+Reservas e compras confirmadas só existem para pratos ``aceito``; ``cardapio_remover`` as
+libera. Um ``Store(ignorar_prato_id=X)`` desconta do cálculo as reservas e compras do próprio
+prato X, para que repetir o registro de X (retry, troca de preço) não conte duas vezes.
 """
 
 from __future__ import annotations
@@ -82,6 +87,15 @@ CREATE TABLE IF NOT EXISTS compras (
     status TEXT NOT NULL,
     criado_em TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reservas (
+    id INTEGER PRIMARY KEY,
+    prato_id INTEGER NOT NULL,
+    ingrediente_id INTEGER NOT NULL,
+    quantidade_base REAL NOT NULL,
+    criado_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reservas_prato ON reservas(prato_id);
+CREATE INDEX IF NOT EXISTS idx_reservas_ingrediente ON reservas(ingrediente_id);
 CREATE TABLE IF NOT EXISTS config (
     chave TEXT PRIMARY KEY,
     valor TEXT NOT NULL
@@ -117,9 +131,16 @@ def _col(row: dict[str, Any], prefix: str) -> Any:
     raise KeyError(f"Coluna começando com {prefix!r} não encontrada em {list(row)}")
 
 
-def _ingredient_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _ingredient_dict(row: sqlite3.Row, reservado: float = 0.0) -> dict[str, Any]:
     d = dict(row)
-    d["estoque_legivel"] = format_base(d["estoque_base"], d["unidade_base"])
+    base = d["unidade_base"]
+    reservado = float(reservado or 0.0)
+    disponivel = max(0.0, float(d["estoque_base"]) - reservado)
+    d["reservado_base"] = round(reservado, 6)
+    d["disponivel_base"] = round(disponivel, 6)
+    d["estoque_legivel"] = format_base(d["estoque_base"], base)
+    d["reservado_legivel"] = format_base(reservado, base)
+    d["disponivel_legivel"] = format_base(disponivel, base)
     if d.get("custo_unitario_base") is not None:
         d["custo_unitario_legivel"] = f"R$ {d['custo_unitario_base']:.2f}/{d['unidade_base']}".replace(".", ",")
     else:
@@ -129,10 +150,12 @@ def _ingredient_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 class Store:
     def __init__(self, db_path: Optional[str | Path] = None, xlsx_path: Optional[str | Path] = None,
-                 orcamento: Optional[float] = None):
+                 orcamento: Optional[float] = None, ignorar_prato_id: Optional[int] = None):
         self.db_path = Path(db_path) if db_path else default_db_path()
         self.xlsx_path = Path(xlsx_path) if xlsx_path else default_xlsx_path()
         self._orcamento = orcamento
+        # Reservas e compras deste prato não contam em disponibilidade/orçamento (reavaliação do próprio prato).
+        self.ignorar_prato_id = int(ignorar_prato_id) if ignorar_prato_id is not None else None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
@@ -158,6 +181,17 @@ class Store:
 
     def _config_set(self, conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT INTO config(chave, valor) VALUES(?, ?) ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (key, value))
+
+    def _reservas_map(self, conn: sqlite3.Connection) -> dict[int, float]:
+        """ingrediente_id -> quantidade reservada por pratos aceitos (menos o prato ignorado)."""
+        rows = conn.execute(
+            """SELECT r.ingrediente_id AS iid, SUM(r.quantidade_base) AS q FROM reservas r
+               JOIN pratos p ON p.id = r.prato_id
+               WHERE p.status = 'aceito' AND (? IS NULL OR r.prato_id IS NOT ?)
+               GROUP BY r.ingrediente_id""",
+            (self.ignorar_prato_id, self.ignorar_prato_id),
+        ).fetchall()
+        return {int(r["iid"]): float(r["q"] or 0.0) for r in rows}
 
     # ------------------------------------------------------------------ carga
     def ensure_loaded(self, force: bool = False) -> dict[str, Any]:
@@ -213,23 +247,27 @@ class Store:
         self.ensure_loaded()
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM ingredientes ORDER BY id").fetchall()
-        return [_ingredient_dict(r) for r in rows]
+            reservas = self._reservas_map(conn)
+        return [_ingredient_dict(r, reservas.get(int(r["id"]), 0.0)) for r in rows]
 
     def obter(self, nome: str) -> Optional[dict[str, Any]]:
         self.ensure_loaded()
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM ingredientes WHERE nome = ? OR nome_norm = ?", (nome, norm_text(nome))).fetchone()
-        return _ingredient_dict(row) if row else None
+            reservas = self._reservas_map(conn) if row else {}
+        return _ingredient_dict(row, reservas.get(int(row["id"]), 0.0)) if row else None
 
     def buscar(self, nome: str, limit: int = 3) -> list[dict[str, Any]]:
         itens = {i["nome"]: i for i in self.ingredientes()}
         exato = self.obter(nome)
+        campos = ("estoque_legivel", "estoque_base", "reservado_legivel", "disponivel_legivel", "disponivel_base",
+                  "unidade_base", "custo_unitario_base", "custo_unitario_legivel", "observacao")
         if exato:
-            return [{"nome": exato["nome"], "score": 1.0, "confiavel": True, **{k: exato[k] for k in ("estoque_legivel", "estoque_base", "unidade_base", "custo_unitario_base", "custo_unitario_legivel", "observacao")}}]
+            return [{"nome": exato["nome"], "score": 1.0, "confiavel": True, **{k: exato[k] for k in campos}}]
         out = []
         for m in best_matches(nome, list(itens), limit=limit):
             item = itens[m["nome"]]
-            out.append({**m, **{k: item[k] for k in ("estoque_legivel", "estoque_base", "unidade_base", "custo_unitario_base", "custo_unitario_legivel", "observacao")}})
+            out.append({**m, **{k: item[k] for k in campos}})
         return out
 
     def melhor_item(self, nome: str) -> Optional[dict[str, Any]]:
@@ -357,25 +395,88 @@ class Store:
             out.append(d)
         return out
 
-    def aceitar_prato(self, prato_id: int, preco_venda: float, compras: list[dict[str, Any]], confirmar_compras: bool = True) -> dict[str, Any]:
+    def aceitar_prato(self, prato_id: int, preco_venda: float, compras: list[dict[str, Any]],
+                      reservas: Optional[list[dict[str, Any]]] = None, *, confirmar_compras: bool = True,
+                      dados: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Aceite numa transação só: status + preço, compras comprometidas e reservas de estoque.
+
+        Idempotente por ``prato_id``: compras e reservas anteriores do mesmo prato são substituídas,
+        então repetir a chamada (retry, troca de preço) nunca duplica orçamento nem reserva.
+        """
         prato = self.obter_prato(prato_id)
         if not prato:
             raise KeyError(f"Prato {prato_id} não encontrado")
         with _LOCK, self.connect() as conn:
-            conn.execute("UPDATE pratos SET preco_venda = ?, status = 'aceito', atualizado_em = ? WHERE id = ?", (float(preco_venda), _now(), prato_id))
+            if dados is not None:
+                conn.execute("UPDATE pratos SET preco_venda = ?, status = 'aceito', dados = ?, atualizado_em = ? WHERE id = ?",
+                             (float(preco_venda), json.dumps(dados, ensure_ascii=False), _now(), prato_id))
+            else:
+                conn.execute("UPDATE pratos SET preco_venda = ?, status = 'aceito', atualizado_em = ? WHERE id = ?", (float(preco_venda), _now(), prato_id))
             conn.execute("DELETE FROM compras WHERE prato_id = ?", (prato_id,))
             for c in compras:
                 conn.execute("INSERT INTO compras(prato_id, ingrediente, quantidade, unidade, preco_estimado, status, criado_em) VALUES(?,?,?,?,?,?,?)",
                              (prato_id, str(c.get("ingrediente")), c.get("quantidade"), c.get("unidade"), float(c.get("preco_estimado") or 0),
                               "confirmada" if confirmar_compras else "planejada", _now()))
+            conn.execute("DELETE FROM reservas WHERE prato_id = ?", (prato_id,))
+            for r in reservas or []:
+                qtd = float(r.get("quantidade_base") or 0)
+                if qtd <= 1e-9 or r.get("ingrediente_id") is None:
+                    continue
+                conn.execute("INSERT INTO reservas(prato_id, ingrediente_id, quantidade_base, criado_em) VALUES(?,?,?,?)",
+                             (prato_id, int(r["ingrediente_id"]), qtd, _now()))
         return self.obter_prato(prato_id) or {}
+
+    def remover_prato(self, prato_id: int, motivo: Optional[str] = None) -> dict[str, Any]:
+        """Tira o prato do cardápio: libera as reservas e cancela as compras comprometidas no orçamento.
+
+        Compra real já lançada no estoque (``registrar_compra``) não é desfeita: o estoque e o custo ficam.
+        """
+        prato = self.obter_prato(prato_id)
+        if not prato:
+            raise KeyError(f"Prato {prato_id} não encontrado")
+        with _LOCK, self.connect() as conn:
+            reservas = conn.execute(
+                """SELECT i.nome AS ingrediente, i.unidade_base, r.quantidade_base FROM reservas r
+                   JOIN ingredientes i ON i.id = r.ingrediente_id WHERE r.prato_id = ? ORDER BY r.id""", (prato_id,)).fetchall()
+            compras = conn.execute("SELECT * FROM compras WHERE prato_id = ? AND status IN ('confirmada', 'planejada') ORDER BY id", (prato_id,)).fetchall()
+            conn.execute("UPDATE compras SET status = 'cancelada' WHERE prato_id = ? AND status IN ('confirmada', 'planejada')", (prato_id,))
+            conn.execute("DELETE FROM reservas WHERE prato_id = ?", (prato_id,))
+            dados = {**prato["dados"], "remocao": {"motivo": motivo, "em": _now(), "status_anterior": prato["status"]}}
+            conn.execute("UPDATE pratos SET status = 'removido', dados = ?, atualizado_em = ? WHERE id = ?",
+                         (json.dumps(dados, ensure_ascii=False), _now(), prato_id))
+        return {
+            "prato": self.obter_prato(prato_id) or {},
+            "reservas_liberadas": [{"ingrediente": r["ingrediente"], "quantidade": format_base(r["quantidade_base"], r["unidade_base"])} for r in reservas],
+            "compras_canceladas": [{k: c[k] for k in ("ingrediente", "quantidade", "unidade", "preco_estimado")} for c in compras],
+        }
+
+    def reservas_do_prato(self, prato_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT i.nome AS ingrediente, i.unidade_base, r.quantidade_base FROM reservas r
+                   JOIN ingredientes i ON i.id = r.ingrediente_id WHERE r.prato_id = ? ORDER BY r.id""", (prato_id,)).fetchall()
+        return [{"ingrediente": r["ingrediente"], "quantidade": format_base(r["quantidade_base"], r["unidade_base"]),
+                 "quantidade_base": r["quantidade_base"], "unidade_base": r["unidade_base"]} for r in rows]
+
+    def reservas_ativas(self) -> list[dict[str, Any]]:
+        """Reservas de todos os pratos aceitos, para o resumo do cardápio."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT r.prato_id, p.nome AS prato, i.nome AS ingrediente, i.unidade_base, r.quantidade_base
+                   FROM reservas r JOIN pratos p ON p.id = r.prato_id JOIN ingredientes i ON i.id = r.ingrediente_id
+                   WHERE p.status = 'aceito' ORDER BY r.prato_id, r.id""").fetchall()
+        return [{"prato_id": r["prato_id"], "prato": r["prato"], "ingrediente": r["ingrediente"],
+                 "quantidade": format_base(r["quantidade_base"], r["unidade_base"])} for r in rows]
 
     # ------------------------------------------------------------------ orçamento
     def orcamento(self) -> dict[str, Any]:
         self.ensure_loaded()
         with self.connect() as conn:
             inicial = float(self._config_get(conn, "orcamento_inicial") or default_budget())
-            rows = conn.execute("SELECT c.*, p.nome AS prato FROM compras c LEFT JOIN pratos p ON p.id = c.prato_id ORDER BY c.id").fetchall()
+            rows = conn.execute(
+                """SELECT c.*, p.nome AS prato FROM compras c LEFT JOIN pratos p ON p.id = c.prato_id
+                   WHERE (? IS NULL OR c.prato_id IS NOT ?) ORDER BY c.id""",
+                (self.ignorar_prato_id, self.ignorar_prato_id)).fetchall()
         confirmadas = [dict(r) for r in rows if r["status"] == "confirmada"]
         planejadas = [dict(r) for r in rows if r["status"] == "planejada"]
         comprometido = round(sum(r["preco_estimado"] for r in confirmadas), 2)

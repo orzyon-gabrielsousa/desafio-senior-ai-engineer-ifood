@@ -88,27 +88,66 @@ class ToolsFlowTests(StoreTestCase):
         self.assertTrue(azeite["estimativa"])
         self.assertAlmostEqual(azeite["custo_uso_total"], round(0.03 * 61.98, 2))
 
+        # Trava: com veredito inviavel/precisa_confirmar o backend recusa o CMV e nada é gravado.
+        bloqueado = call("prato_calcular_cmv", nome="Frango com batatas", porcoes=4, receita_id=receita["receita_id"])
+        self.assertFalse(bloqueado["success"])
+        self.assertTrue(bloqueado["bloqueado"])
+        self.assertEqual({b["tipo"] for b in bloqueado["bloqueios"]}, {"tecnica_faltando", "equipamento_nao_informado", "tecnica_nao_informada"})
+        self.assertEqual(call("cardapio_consultar")["pratos_em_analise"], [])
+
+        # Dona Maria responde o que faltava; o CMV reavalia sozinho, sem conferir a receita de novo.
+        call("perfil_cozinha_salvar", equipamentos={"batedeira": True}, tecnicas={"massa fresca": "sim", "ponto de carne": "sim"})
         cmv = call("prato_calcular_cmv", nome="Frango com batatas", porcoes=4, receita_id=receita["receita_id"])
         self.assertTrue(cmv["success"], cmv)
+        self.assertEqual(cmv["veredito"], "viavel")
         esperado = 14.0 + 6.0 + 0.6 + 0.3 + round(0.03 * 61.98, 4) + 3.5 + round(0.005 * 1.85, 4)
         self.assertAlmostEqual(cmv["cmv_total"], round(esperado, 2), places=1)
         self.assertAlmostEqual(cmv["cmv_por_porcao"], round(cmv["cmv_total"] / 4, 2))
         self.assertTrue(any("CMV por porção" in linha for linha in cmv["memoria_de_calculo"]))
+        self.assertIn({"ingrediente": "Peito de frango", "quantidade": "1 kg"}, cmv["reservas_previstas"])
 
         preco = call("preco_sugerir", cmv_por_porcao=cmv["cmv_por_porcao"], prato_id=cmv["prato_id"], precos_para_simular=[15, 25])
         self.assertEqual(len(preco["cenarios"]), 3)
         self.assertEqual(len(preco["simulacoes"]), 2)
         self.assertAlmostEqual(preco["preco_minimo"], round(cmv["cmv_por_porcao"] / 0.9, 2))
 
-        registro = call("cardapio_registrar", prato_id=cmv["prato_id"], preco_escolhido=preco["cenarios"][1]["preco_sugerido"])
+        escolhido = preco["cenarios"][1]["preco_sugerido"]
+        registro = call("cardapio_registrar", prato_id=cmv["prato_id"], preco_escolhido=escolhido)
         self.assertTrue(registro["success"], registro)
+        self.assertFalse(registro["ja_registrado"])
         self.assertEqual(registro["orcamento"]["comprometido"], 3.5)
         self.assertEqual(registro["orcamento"]["restante"], 76.5)
+        self.assertIn({"ingrediente": "Peito de frango", "quantidade": "1 kg"}, registro["reservas_registradas"])
+
+        # Retry: repetir o registro do mesmo prato não duplica orçamento nem reserva.
+        de_novo = call("cardapio_registrar", prato_id=cmv["prato_id"], preco_escolhido=escolhido)
+        self.assertTrue(de_novo["success"], de_novo)
+        self.assertTrue(de_novo["ja_registrado"])
+        self.assertEqual(de_novo["orcamento"]["comprometido"], 3.5)
+        self.assertEqual(len(de_novo["reservas_registradas"]), len(registro["reservas_registradas"]))
+
+        # A reserva aparece na despensa e já conta para o próximo prato.
+        frango = call("despensa_buscar", ingredientes=["peito de frango"])["resultados"][0]["candidatos"][0]
+        self.assertEqual((frango["estoque_legivel"], frango["disponivel_legivel"]), ("2 kg", "1 kg"))
+        segundo = call("receita_conferir_ingredientes", nome="Frango ao molho", porcoes=4,
+                       ingredientes=[{"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg"}])
+        linha = segundo["ingredientes"][0]
+        self.assertEqual((linha["tem_na_despensa"], linha["reservado_por_outros_pratos"], linha["falta"]), ("1 kg", "1 kg", "500 g"))
 
         cardapio = call("cardapio_consultar")
         self.assertEqual(len(cardapio["cardapio"]), 1)
         self.assertEqual(cardapio["cardapio"][0]["nome"], "Frango com batatas")
         self.assertGreater(cardapio["cardapio"][0]["lucro_por_porcao"], 0)
+        self.assertEqual(cardapio["estoque_reservado"][0]["ingrediente"], "Peito de frango")
+
+        # Remover libera a reserva e devolve o orçamento.
+        removido = call("cardapio_remover", prato_id=cmv["prato_id"], motivo="mudou de ideia")
+        self.assertTrue(removido["success"], removido)
+        self.assertEqual(removido["orcamento"]["restante"], 80.0)
+        self.assertIn({"ingrediente": "Peito de frango", "quantidade": "1 kg"}, removido["reservas_liberadas"])
+        self.assertEqual(call("despensa_buscar", ingredientes=["peito de frango"])["resultados"][0]["candidatos"][0]["disponivel_legivel"], "2 kg")
+        self.assertFalse(call("preco_sugerir", prato_id=cmv["prato_id"])["success"])
+        self.assertEqual(call("cardapio_consultar")["cardapio"], [])
 
     def test_missing_quantities_and_unknown_content_become_pendencias(self):
         out = call("receita_conferir_ingredientes", nome="Bolo", porcoes=8, ingredientes=[
@@ -140,6 +179,82 @@ class ToolsFlowTests(StoreTestCase):
         out = call("prato_calcular_cmv", nome="x", porcoes=0, ingredientes=[{"nome": "sal", "quantidade": 1, "unidade": "g"}])
         self.assertFalse(out["success"])
         self.assertIn("porcoes", out["error"])
+
+
+class GateTests(StoreTestCase):
+    """As travas ficam no backend: o modelo não consegue chegar ao CMV, ao preço nem ao cardápio com pendência."""
+
+    def _perfil_completo(self):
+        call("perfil_cozinha_salvar",
+             equipamentos={"fogão": 4, "forno": True, "panela de pressão": True, "air fryer": False, "liquidificador": True},
+             restricoes={"espaco_geladeira": "médio", "tempo_por_cozinhada_min": 120, "gas": "botijão ok", "energia": "estável"},
+             tecnicas={"refogado": "sim"})
+
+    def test_cmv_requires_conferred_recipe(self):
+        self._perfil_completo()
+        out = call("prato_calcular_cmv", nome="Arroz", porcoes=4, ingredientes=[{"nome": "arroz", "quantidade": 500, "unidade": "g"}])
+        self.assertFalse(out["success"])
+        self.assertEqual(out["bloqueios"][0]["tipo"], "sem_receita_conferida")
+        self.assertEqual(call("cardapio_consultar")["pratos_em_analise"], [])
+
+    def test_cmv_blocked_while_profile_is_pending(self):
+        receita = call("receita_conferir_ingredientes", nome="Arroz", porcoes=4, ingredientes=[{"nome": "arroz", "quantidade": 500, "unidade": "g"}])
+        self.assertEqual(receita["veredito"], "precisa_confirmar")
+        out = call("prato_calcular_cmv", receita_id=receita["receita_id"])
+        self.assertFalse(out["success"])
+        self.assertTrue(out["bloqueado"])
+        self.assertEqual({b["tipo"] for b in out["bloqueios"]}, {"perfil_pendente"})
+        self.assertEqual(len(out["bloqueios"]), 10)
+        self.assertTrue(any("clarify" in p for p in out["proximos_passos"]))
+
+    def test_missing_oven_blocks_cmv(self):
+        self._perfil_completo()
+        call("perfil_cozinha_salvar", equipamentos={"forno": False})
+        receita = call("receita_conferir_ingredientes", nome="Lasanha", porcoes=6,
+                       ingredientes=[{"nome": "carne moída", "quantidade": 500, "unidade": "g"}],
+                       equipamentos_necessarios=["forno"], tecnicas_necessarias=["refogado"])
+        self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
+        out = call("prato_calcular_cmv", receita_id=receita["receita_id"])
+        self.assertFalse(out["success"])
+        self.assertEqual([b["tipo"] for b in out["bloqueios"]], ["equipamento_faltando"])
+
+    def test_over_budget_is_refused(self):
+        self._perfil_completo()
+        receita = call("receita_conferir_ingredientes", nome="Salmão", porcoes=2, ingredientes=[
+            {"nome": "salmão", "quantidade": 1, "unidade": "kg", "item_despensa": "", "preco_compra_estimado": 95, "quantidade_compra": 1, "unidade_compra": "kg"}])
+        self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
+        out = call("prato_calcular_cmv", receita_id=receita["receita_id"])
+        self.assertFalse(out["success"])
+        self.assertEqual(out["bloqueios"][0]["tipo"], "orcamento")
+
+    def test_preco_requires_prato_with_cmv(self):
+        out = call("preco_sugerir", cmv_por_porcao=10)
+        self.assertFalse(out["success"])
+        self.assertEqual(out["bloqueios"][0]["tipo"], "sem_cmv_calculado")
+
+    def test_registration_refuses_when_numbers_changed(self):
+        self._perfil_completo()
+        a = call("receita_conferir_ingredientes", nome="Prato A", porcoes=4, ingredientes=[{"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg"}])
+        b = call("receita_conferir_ingredientes", nome="Prato B", porcoes=4, ingredientes=[
+            {"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg", "preco_compra_estimado": 16, "quantidade_compra": 1, "unidade_compra": "kg"}])
+        cmv_a = call("prato_calcular_cmv", receita_id=a["receita_id"])
+        cmv_b = call("prato_calcular_cmv", receita_id=b["receita_id"])
+        self.assertEqual((cmv_a["cmv_total"], cmv_b["cmv_total"]), (21.0, 21.0))  # candidatas não consomem estoque: as duas veem 2 kg
+        self.assertTrue(call("cardapio_registrar", prato_id=cmv_a["prato_id"], preco_escolhido=12)["success"])
+        # B foi apresentado usando 1,5 kg da despensa; com A aceito sobra 0,5 kg → compra de 1 kg e CMV diferente.
+        reg_b = call("cardapio_registrar", prato_id=cmv_b["prato_id"], preco_escolhido=12)
+        self.assertFalse(reg_b["success"])
+        self.assertEqual(reg_b["bloqueios"][0]["tipo"], "numeros_mudaram")
+        self.assertEqual(call("cardapio_consultar")["orcamento"]["comprometido"], 0.0)
+        cmv_b2 = call("prato_calcular_cmv", receita_id=b["receita_id"])
+        self.assertTrue(cmv_b2["success"], cmv_b2)
+        self.assertEqual(cmv_b2["compras_total_estimado"], 16.0)
+        self.assertAlmostEqual(cmv_b2["cmv_total"], 0.5 * 14 + 1.0 * 16)
+        reg_b2 = call("cardapio_registrar", prato_id=cmv_b2["prato_id"], preco_escolhido=12)
+        self.assertTrue(reg_b2["success"], reg_b2)
+        self.assertEqual(reg_b2["orcamento"]["comprometido"], 16.0)
+        frango = call("despensa_buscar", ingredientes=["peito de frango"])["resultados"][0]["candidatos"][0]
+        self.assertEqual((frango["reservado_legivel"], frango["disponivel_legivel"]), ("2 kg", "0 g"))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,13 @@ As tools cobrem as quatro etapas do desafio:
 
 * 2.1/2.3  despensa_listar, despensa_buscar, despensa_atualizar, receita_conferir_ingredientes
 * 2.2      perfil_cozinha_consultar, perfil_cozinha_salvar (elicitação com checklist)
-* 2.4      prato_calcular_cmv, preco_sugerir, cardapio_registrar, cardapio_consultar
+* 2.4      prato_calcular_cmv, preco_sugerir, cardapio_registrar, cardapio_remover, cardapio_consultar
+
+Travas no backend (não dependem do que o modelo diz): ``prato_calcular_cmv`` e
+``cardapio_registrar`` reavaliam o prato contra o estado atual (perfil salvo, despensa
+disponível, orçamento restante) e recusam com ``bloqueado: true`` + ``bloqueios`` enquanto
+houver requisito sem resposta ou impedimento conhecido. ``cardapio_registrar`` ainda recusa
+se CMV/compras mudaram desde a apresentação, e só ele reserva estoque e compromete orçamento.
 """
 
 from __future__ import annotations
@@ -198,16 +204,20 @@ def despensa_listar(args: dict) -> dict:
         total_pago += item.get("preco_total") or 0
         if filtro and filtro not in item["nome_norm"]:
             continue
-        itens.append({
+        entrada = {
             "ingrediente": item["nome"],
             "estoque": item["estoque_legivel"],
+            "disponivel": item["disponivel_legivel"],
             "unidade_base": item["unidade_base"],
             "custo_unitario": round(item["custo_unitario_base"], 4) if item.get("custo_unitario_base") is not None else None,
             "custo_unitario_legivel": item["custo_unitario_legivel"],
             "preco_pago": item.get("preco_total"),
             "unidade_na_planilha": item.get("unidade_original"),
             "observacao": item.get("observacao"),
-        })
+        }
+        if item.get("reservado_base"):
+            entrada["reservado_para_pratos_aceitos"] = item["reservado_legivel"]
+        itens.append(entrada)
     return {
         "success": True,
         "planilha": carga.get("origem"),
@@ -215,7 +225,8 @@ def despensa_listar(args: dict) -> dict:
         "valor_total_pago": round(total_pago, 2),
         "orcamento": store.orcamento(),
         "itens": itens,
-        "nota": "custo_unitario = preço total pago ÷ quantidade comprada, já convertido para kg, L ou un.",
+        "nota": ("custo_unitario = preço total pago ÷ quantidade comprada, já convertido para kg, L ou un. "
+                 "disponivel = estoque − o que os pratos já aceitos no cardápio reservaram."),
     }
 
 
@@ -312,15 +323,21 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
                 linhas.append(linha)
                 continue
             necessario = conv.qty_base
-            tem = float(item.get("estoque_base") or 0)
+            estoque = float(item.get("estoque_base") or 0)
+            reservado = float(item.get("reservado_base") or 0)
+            tem = max(0.0, estoque - reservado)  # disponível = estoque − reservas de outros pratos já aceitos
             usa = min(necessario, tem)
             falta = max(0.0, necessario - tem)
             custo_unit = item.get("custo_unitario_base")
             linha.update({
+                "item_id": item["id"],
                 "necessario": format_base(necessario, base), "necessario_base": round(necessario, 4), "unidade_base": base,
-                "tem_na_despensa": format_base(tem, base), "usa_da_despensa": format_base(usa, base),
+                "tem_na_despensa": format_base(tem, base), "usa_da_despensa": format_base(usa, base), "usa_da_despensa_base": round(usa, 6),
                 "falta": format_base(falta, base) if falta > 1e-9 else "nada",
             })
+            if reservado > 1e-9:
+                linha["estoque_total"] = format_base(estoque, base)
+                linha["reservado_por_outros_pratos"] = format_base(reservado, base)
             custo_despensa = (usa * custo_unit) if custo_unit is not None else 0.0
             if custo_unit is None:
                 pendencias.append(f"{nome}: item sem preço na planilha")
@@ -436,6 +453,102 @@ def _restricoes_relevantes(perfil: dict[str, Any], tempo_preparo_min: Optional[f
     return avisos
 
 
+# ----------------------------------------------------------------------------- veredito e travas
+def _bloqueio(tipo: str, detalhe: str, **extra: Any) -> dict[str, Any]:
+    return {"tipo": tipo, "detalhe": detalhe, **extra}
+
+
+def _avaliar(res: dict[str, Any], equip: dict[str, list[str]], tec: dict[str, list[str]], orc: dict[str, Any],
+             pend_perfil: list[dict[str, str]]) -> dict[str, Any]:
+    """Veredito único, usado pela conferência (2.3), pelo CMV e pelo registro no cardápio (2.4).
+
+    * ``inviavel_por_enquanto``: impedimento conhecido (equipamento ou técnica que ela disse não ter,
+      compras que não cabem no orçamento).
+    * ``precisa_confirmar``: falta resposta (checklist do perfil, equipamento/técnica não informados,
+      pendência de ingrediente).
+    * ``viavel``: nada pendente. Só este veredito libera ``prato_calcular_cmv`` e ``cardapio_registrar``.
+    """
+    impedimentos: list[dict[str, Any]] = []
+    for e in equip["faltando"]:
+        impedimentos.append(_bloqueio("equipamento_faltando", f"{e}: Dona Maria disse que não tem"))
+    for t in tec["faltando"]:
+        impedimentos.append(_bloqueio("tecnica_faltando", f"{t}: Dona Maria disse que não domina"))
+    if not orc["cabe_no_orcamento"]:
+        impedimentos.append(_bloqueio("orcamento", f"as compras deste prato ({costing.brl(orc['compras_desta_receita'])}) "
+                                                   f"não cabem nos {costing.brl(orc['restante'])} restantes do orçamento"))
+    confirmacoes: list[dict[str, Any]] = []
+    for p in res["pendencias"]:
+        confirmacoes.append(_bloqueio("ingrediente_pendente", p))
+    for e in equip["nao_informado"]:
+        confirmacoes.append(_bloqueio("equipamento_nao_informado", f"{e}: ela ainda não disse se tem"))
+    for t in tec["nao_informado"]:
+        confirmacoes.append(_bloqueio("tecnica_nao_informada", f"{t}: ela ainda não disse se domina"))
+    for t in tec["parcial"]:
+        confirmacoes.append(_bloqueio("tecnica_parcial", f"{t}: ela disse que domina só em parte; confirme se dá conta nesta receita"))
+    for p in pend_perfil:
+        confirmacoes.append(_bloqueio("perfil_pendente", p["pergunta"], chave=p["chave"]))
+    if impedimentos:
+        veredito = "inviavel_por_enquanto"
+    elif confirmacoes:
+        veredito = "precisa_confirmar"
+    else:
+        veredito = "viavel"
+    proximos: list[str] = []
+    if impedimentos:
+        proximos.append("explique o impedimento e proponha saída: substituir equipamento/técnica, reduzir porções ou outra receita")
+    if pend_perfil:
+        proximos.append("perguntar à Dona Maria os itens de perfil pendentes (clarify) e salvar com perfil_cozinha_salvar")
+    if equip["nao_informado"] or tec["nao_informado"] or tec["parcial"]:
+        proximos.append("confirmar com ela os equipamentos/técnicas marcados como nao_informado ou parcial e salvar com perfil_cozinha_salvar")
+    if res["pendencias"]:
+        proximos.append("resolver as pendências de ingredientes (preço de compra, peso de embalagem, quantidade)")
+    return {"veredito": veredito, "bloqueios": impedimentos + confirmacoes, "proximos_passos": proximos}
+
+
+def _requisitos(receita: dict[str, Any]) -> dict[str, Any]:
+    dados = receita.get("dados") or {}
+    return {
+        "equipamentos_necessarios": [str(x) for x in (dados.get("equipamentos_necessarios") or [])],
+        "tecnicas_necessarias": [str(x) for x in (dados.get("tecnicas_necessarias") or [])],
+        "tempo_preparo_min": _num(dados.get("tempo_preparo_min")),
+    }
+
+
+def _avaliar_prato(store: Store, ingredientes: list[Any], receita: dict[str, Any]) -> dict[str, Any]:
+    """Reavalia um prato contra o estado ATUAL: perfil salvo, despensa disponível (estoque menos reservas
+    de outros pratos aceitos) e orçamento restante. É o que torna a trava independente do que o modelo diz."""
+    req = _requisitos(receita)
+    res = _resolver_ingredientes(store, ingredientes)
+    perfil = store.perfil()
+    equip = _checar_equipamentos(perfil, req["equipamentos_necessarios"])
+    tec = _checar_tecnicas(perfil, req["tecnicas_necessarias"])
+    orc = _orcamento_resumo(store, res["compras_total_estimado"])
+    aval = _avaliar(res, equip, tec, orc, _pendencias_perfil(perfil))
+    aval.update({"resultado": res, "equipamentos": equip, "tecnicas": tec, "orcamento": orc, "requisitos": req,
+                 "avisos_operacionais": _restricoes_relevantes(perfil, req["tempo_preparo_min"])})
+    return aval
+
+
+def _recusa(motivo: str, aval: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Resposta padrão de trava: nada foi gravado; o modelo recebe o que falta e o que fazer."""
+    return {"success": False, "bloqueado": True, "error": motivo, "veredito": aval.get("veredito"),
+            "bloqueios": aval.get("bloqueios", []), "proximos_passos": aval.get("proximos_passos", []), **extra}
+
+
+def _reservas_de(res: dict[str, Any], legivel: bool = False) -> list[dict[str, Any]]:
+    """Linhas da receita que saem da despensa: viram reserva no aceite."""
+    out: list[dict[str, Any]] = []
+    for linha in res["itens"]:
+        if linha.get("item_id") is None or (linha.get("usa_da_despensa_base") or 0) <= 1e-9:
+            continue
+        if legivel:
+            out.append({"ingrediente": linha["item_despensa"], "quantidade": linha["usa_da_despensa"]})
+        else:
+            out.append({"ingrediente_id": linha["item_id"], "ingrediente": linha["item_despensa"],
+                        "quantidade_base": linha["usa_da_despensa_base"], "unidade_base": linha["unidade_base"]})
+    return out
+
+
 # ----------------------------------------------------------------------------- 2.3 conferência
 @_tool
 def receita_conferir_ingredientes(args: dict) -> dict:
@@ -455,31 +568,24 @@ def receita_conferir_ingredientes(args: dict) -> dict:
     ja_tem = [l["ingrediente"] for l in res["itens"] if l.get("item_despensa") and l.get("falta") == "nada"]
     parcial = [l["ingrediente"] for l in res["itens"] if l.get("item_despensa") and l.get("falta") not in (None, "nada")]
     nao_tem = [l["ingrediente"] for l in res["itens"] if not l.get("item_despensa")]
-    if equip["faltando"] or tec["faltando"] or not orc["cabe_no_orcamento"]:
-        veredito = "inviavel_por_enquanto"
-    elif res["pendencias"] or equip["nao_informado"] or tec["nao_informado"] or tec["parcial"] or pend_perfil:
-        veredito = "precisa_confirmar"
-    else:
-        veredito = "viavel"
+    aval = _avaliar(res, equip, tec, orc, pend_perfil)
+    veredito = aval["veredito"]
     dados = {"ingredientes": ingredientes, "resultado": res, "equipamentos": equip, "tecnicas": tec, "veredito": veredito,
              "equipamentos_necessarios": args.get("equipamentos_necessarios"), "tecnicas_necessarias": args.get("tecnicas_necessarias"),
              "tempo_preparo_min": args.get("tempo_preparo_min")}
     receita_id = store.salvar_receita(nome, args.get("fonte_url"), porcoes, dados, "conferida")
-    proximos = []
-    if pend_perfil:
-        proximos.append("perguntar à Dona Maria os itens de perfil pendentes (clarify) e salvar com perfil_cozinha_salvar")
-    if equip["nao_informado"] or tec["nao_informado"] or tec["parcial"]:
-        proximos.append("confirmar com ela os equipamentos/técnicas marcados como nao_informado ou parcial antes de seguir")
-    if res["pendencias"]:
-        proximos.append("resolver as pendências de ingredientes (preço de compra, peso de embalagem, quantidade)")
+    proximos = list(aval["proximos_passos"])
     if veredito == "viavel":
-        proximos.append("se ela gostar da receita, chamar prato_calcular_cmv com os mesmos ingredientes e porções")
+        proximos.append(f"se ela gostar da receita, chamar prato_calcular_cmv com receita_id={receita_id}")
+    else:
+        proximos.append(f"resolvidos os bloqueios, chamar prato_calcular_cmv com receita_id={receita_id} (ele reavalia sozinho; não precisa conferir de novo)")
     return {
         "success": True,
         "receita_id": receita_id,
         "receita": nome,
         "porcoes": porcoes,
         "veredito": veredito,
+        "bloqueios": aval["bloqueios"],
         "ingredientes": res["itens"],
         "resumo": {
             "ja_tem_tudo_que_precisa": ja_tem,
@@ -508,10 +614,10 @@ def prato_calcular_cmv(args: dict) -> dict:
     ingredientes = args.get("ingredientes")
     nome = str(args.get("nome") or "").strip()
     porcoes = _num(args.get("porcoes"))
-    if receita_id and not ingredientes:
-        receita = store.obter_receita(int(receita_id))
-        if not receita:
-            raise KeyError(f"receita_id {receita_id} não encontrada")
+    receita = store.obter_receita(int(receita_id)) if receita_id else None
+    if receita_id and not receita:
+        raise KeyError(f"receita_id {receita_id} não encontrada")
+    if receita and not ingredientes:
         ingredientes = receita["dados"].get("ingredientes") or []
         nome = nome or receita["nome"]
         porcoes = porcoes or receita.get("porcoes")
@@ -519,15 +625,28 @@ def prato_calcular_cmv(args: dict) -> dict:
         raise ValueError("informe 'ingredientes' (lista) ou 'receita_id' de uma receita já conferida")
     if not porcoes or porcoes <= 0:
         raise ValueError("informe 'porcoes' (quantas porções a receita rende) para calcular o CMV por porção")
-    res = _resolver_ingredientes(store, ingredientes)
+    if receita is None:
+        return _recusa(
+            "CMV só é calculado para receita conferida: chame receita_conferir_ingredientes (com equipamentos_necessarios e "
+            "tecnicas_necessarias) e passe o receita_id devolvido",
+            {"bloqueios": [_bloqueio("sem_receita_conferida", "o prato não está ligado a uma receita conferida; sem isso não dá para checar equipamentos e técnicas")],
+             "proximos_passos": ["chamar receita_conferir_ingredientes e depois prato_calcular_cmv com receita_id"]})
+    # Trava: reavalia contra o estado atual. Só 'viavel' libera o CMV ("nunca pule a etapa 2 para chegar ao preço").
+    aval = _avaliar_prato(store, ingredientes, receita)
+    if aval["veredito"] != "viavel":
+        return _recusa(
+            f"CMV bloqueado: veredito {aval['veredito']} com {len(aval['bloqueios'])} pendência(s); resolva os bloqueios e chame de novo com o mesmo receita_id",
+            aval, receita_id=int(receita_id))
+    res = aval["resultado"]
     cmv_total = res["cmv_total"]
     cmv_porcao = round(cmv_total / porcoes, 2)
-    orc = _orcamento_resumo(store, res["compras_total_estimado"])
+    orc = aval["orcamento"]
     memoria = [f"{l['ingrediente']}: {l['memoria_de_calculo']}" for l in res["itens"] if l.get("memoria_de_calculo")]
     memoria.append(f"CMV da receita = soma = {costing.brl(cmv_total)}")
     memoria.append(f"CMV por porção = {costing.brl(cmv_total)} ÷ {porcoes:g} porções = {costing.brl(cmv_porcao)}")
-    dados = {"ingredientes": ingredientes, "resultado": res, "memoria_de_calculo": memoria}
-    prato_id = store.salvar_prato(nome or "Prato sem nome", int(receita_id) if receita_id else None, porcoes, cmv_total, cmv_porcao, dados)
+    dados = {"ingredientes": ingredientes, "resultado": res, "memoria_de_calculo": memoria,
+             "avaliacao": {k: aval[k] for k in ("veredito", "equipamentos", "tecnicas", "orcamento", "requisitos")}}
+    prato_id = store.salvar_prato(nome or "Prato sem nome", int(receita_id), porcoes, cmv_total, cmv_porcao, dados)
     return {
         "success": True,
         "prato_id": prato_id,
@@ -546,20 +665,34 @@ def prato_calcular_cmv(args: dict) -> dict:
         "pendencias": res["pendencias"],
         "estimativas": res["estimativas"],
         "itens": res["itens"],
-        "proximo_passo": f"chame preco_sugerir com cmv_por_porcao={cmv_porcao} e prato_id={prato_id} para montar 2–3 cenários",
+        "veredito": aval["veredito"],
+        "avisos_operacionais": aval["avisos_operacionais"],
+        "reservas_previstas": _reservas_de(res, legivel=True),
+        "proximo_passo": (f"chame preco_sugerir com prato_id={prato_id} para montar 2–3 cenários; só cardapio_registrar "
+                          "(com o preço que ela escolher) reserva o estoque e compromete o orçamento"),
     }
 
 
 @_tool
 def preco_sugerir(args: dict) -> dict:
     store = Store()
-    cmv = _num(args.get("cmv_por_porcao"))
     prato_id = args.get("prato_id")
-    prato = store.obter_prato(int(prato_id)) if prato_id else None
-    if cmv is None and prato:
-        cmv = prato.get("cmv_porcao")
-    if cmv is None:
-        raise ValueError("informe 'cmv_por_porcao' (ou 'prato_id' de um prato já calculado)")
+    if not prato_id:
+        return _recusa(
+            "preço só é sugerido para prato com CMV calculado pela tool: chame prato_calcular_cmv e passe o prato_id",
+            {"bloqueios": [_bloqueio("sem_cmv_calculado", "cmv_por_porcao avulso não é aceito: o CMV precisa vir de prato_calcular_cmv (conta de cabeça não vale)")],
+             "proximos_passos": ["chamar prato_calcular_cmv (com receita_id) e depois preco_sugerir com prato_id"]})
+    prato = store.obter_prato(int(prato_id))
+    if not prato:
+        raise KeyError(f"prato_id {prato_id} não encontrado")
+    if prato["status"] == "removido":
+        return _recusa("prato removido do cardápio; se ela quiser retomá-lo, calcule de novo com prato_calcular_cmv",
+                       {"bloqueios": [_bloqueio("prato_removido", f"prato {prato_id} foi removido")], "proximos_passos": ["chamar prato_calcular_cmv de novo"]})
+    cmv = float(prato.get("cmv_porcao") or 0)
+    avisos: list[str] = []
+    informado = _num(args.get("cmv_por_porcao"))
+    if informado is not None and abs(informado - cmv) > 0.005:
+        avisos.append(f"cmv_por_porcao informado ({costing.brl(informado)}) difere do calculado pela tool ({costing.brl(cmv)}); os cenários usam o calculado")
     taxa = _num(args.get("taxa_plataforma"), costing.TAXA_PADRAO) or costing.TAXA_PADRAO
     if taxa > 1:
         taxa = taxa / 100.0
@@ -574,8 +707,9 @@ def preco_sugerir(args: dict) -> dict:
         saida["simulacoes"] = costing.simular_precos(cmv, [p for p in (_num(x) for x in simulacoes) if p], taxa)
     saida.update({
         "success": True,
-        "prato_id": prato_id,
-        "prato": prato["nome"] if prato else None,
+        "prato_id": int(prato_id),
+        "prato": prato["nome"],
+        "avisos": avisos,
         "orientacao": ("Explique a taxa de 10%, mostre o preço mínimo e os cenários com a conta aberta, e pergunte qual "
                        "preço a Dona Maria quer adotar. A decisão é dela; depois registre com cardapio_registrar."),
     })
@@ -584,25 +718,95 @@ def preco_sugerir(args: dict) -> dict:
 
 @_tool
 def cardapio_registrar(args: dict) -> dict:
-    store = Store()
     prato_id = args.get("prato_id")
     preco = _num(args.get("preco_escolhido"))
     if not prato_id or preco is None:
         raise ValueError("informe 'prato_id' e 'preco_escolhido'")
-    prato = store.obter_prato(int(prato_id))
+    if preco <= 0:
+        raise ValueError("'preco_escolhido' precisa ser maior que zero")
+    prato_id = int(prato_id)
+    # A reavaliação ignora reservas/compras deste mesmo prato: repetir a chamada (retry, troca de preço) não duplica nada.
+    store = Store(ignorar_prato_id=prato_id)
+    prato = store.obter_prato(prato_id)
     if not prato:
         raise KeyError(f"prato_id {prato_id} não encontrado")
-    compras = prato["dados"].get("resultado", {}).get("compras", [])
-    confirmado = store.aceitar_prato(int(prato_id), preco, compras, confirmar_compras=args.get("confirmar_compras", True))
-    avaliacao = costing.avaliar_preco(preco, float(prato["cmv_porcao"] or 0))
+    if prato["status"] == "removido":
+        return _recusa("prato foi removido do cardápio; se ela quiser retomá-lo, calcule de novo com prato_calcular_cmv",
+                       {"bloqueios": [_bloqueio("prato_removido", f"prato {prato_id} foi removido")],
+                        "proximos_passos": ["chamar prato_calcular_cmv de novo e apresentar os preços outra vez"]})
+    receita = store.obter_receita(int(prato["receita_id"])) if prato.get("receita_id") else None
+    if receita is None:
+        return _recusa("prato sem receita conferida não entra no cardápio",
+                       {"bloqueios": [_bloqueio("sem_receita_conferida", "não há como checar equipamentos e técnicas de um prato que não passou por receita_conferir_ingredientes")],
+                        "proximos_passos": ["chamar receita_conferir_ingredientes, depois prato_calcular_cmv com receita_id, preco_sugerir e só então cardapio_registrar"]})
+    ingredientes = prato["dados"].get("ingredientes") or []
+    # Trava 1: o estado ATUAL (perfil, despensa disponível, orçamento) precisa estar 'viavel'. O que o modelo
+    # escreveu na conversa não conta; só o que foi salvo com perfil_cozinha_salvar / despensa_atualizar.
+    aval = _avaliar_prato(store, ingredientes, receita)
+    if aval["veredito"] != "viavel":
+        return _recusa(f"registro bloqueado: veredito {aval['veredito']}; o cardápio só aceita prato sem pendência, "
+                       "mesmo que a conversa diga que está tudo certo", aval)
+    res = aval["resultado"]
+    porcoes = float(prato.get("porcoes") or 0)
+    cmv_porcao = round(res["cmv_total"] / porcoes, 2) if porcoes else None
+    # Trava 2: o preço foi escolhido em cima de um CMV e de uma lista de compras apresentados. Se mudaram
+    # (outro prato reservou estoque, despensa ou orçamento alterados), a escolha anterior não vale.
+    res_antes = prato["dados"].get("resultado") or {}
+    cmv_antes = float(prato.get("cmv_porcao") or 0)
+    compras_antes = float(res_antes.get("compras_total_estimado") or 0)
+    if abs(cmv_antes - float(cmv_porcao or 0)) > 0.005 or abs(compras_antes - float(res["compras_total_estimado"] or 0)) > 0.005:
+        return _recusa(
+            "os números mudaram desde que o CMV foi apresentado (outro prato reservou estoque, ou despensa/orçamento mudaram); "
+            "o preço escolhido não vale para a versão nova",
+            {"veredito": "precisa_confirmar",
+             "bloqueios": [_bloqueio("numeros_mudaram", f"CMV/porção {costing.brl(cmv_antes)} → {costing.brl(float(cmv_porcao or 0))}; "
+                                                        f"compras {costing.brl(compras_antes)} → {costing.brl(res['compras_total_estimado'])}")],
+             "proximos_passos": [f"chamar prato_calcular_cmv de novo com receita_id={receita['id']}, apresentar o novo CMV e novos cenários "
+                                 "(preco_sugerir) e pedir a escolha dela outra vez"]},
+            antes={"cmv_por_porcao": cmv_antes, "compras_total": compras_antes},
+            agora={"cmv_por_porcao": cmv_porcao, "compras_total": res["compras_total_estimado"]})
+    ja_registrado = prato["status"] == "aceito"
+    dados = {**prato["dados"], "resultado": res,
+             "avaliacao": {k: aval[k] for k in ("veredito", "equipamentos", "tecnicas", "orcamento", "requisitos")},
+             "registro": {"preco_escolhido": preco, "porcoes": porcoes, "cmv_por_porcao": cmv_porcao}}
+    confirmado = store.aceitar_prato(prato_id, preco, res["compras"], _reservas_de(res),
+                                     confirmar_compras=bool(args.get("confirmar_compras", True)), dados=dados)
+    avaliacao = costing.avaliar_preco(preco, float(cmv_porcao or 0))
+    alertas: list[str] = []
+    if not avaliacao["viavel"]:
+        alertas.append(f"o preço escolhido ({costing.brl(preco)}) fica abaixo do mínimo ({costing.brl(costing.preco_minimo(float(cmv_porcao or 0)))}): "
+                       f"prejuízo de {costing.brl(-avaliacao['lucro'])} por porção; confirme com ela se é isso mesmo")
+    final = Store()  # visão completa (sem ignorar nada) para orçamento e reservas
     return {
         "success": True,
+        "ja_registrado": ja_registrado,
         "prato": {"id": confirmado["id"], "nome": confirmado["nome"], "porcoes": confirmado["porcoes"], "cmv_por_porcao": confirmado["cmv_porcao"],
                   "preco_venda": confirmado["preco_venda"], "status": confirmado["status"]},
         "resultado_por_porcao": avaliacao,
-        "compras_registradas": compras,
+        "compras_registradas": res["compras"],
+        "reservas_registradas": [{k: r[k] for k in ("ingrediente", "quantidade")} for r in final.reservas_do_prato(prato_id)],
+        "orcamento": final.orcamento(),
+        "alertas": alertas,
+        "nota": ("Estoque reservado e orçamento comprometido para este prato. Lembre a Dona Maria de lançar as compras reais com "
+                 "despensa_atualizar(compra=...) quando ela voltar do mercado. Para tirar o prato do cardápio: cardapio_remover."),
+    }
+
+
+@_tool
+def cardapio_remover(args: dict) -> dict:
+    store = Store()
+    prato_id = args.get("prato_id")
+    if not prato_id:
+        raise ValueError("informe 'prato_id'")
+    out = store.remover_prato(int(prato_id), motivo=str(args.get("motivo") or "").strip() or None)
+    p = out["prato"]
+    return {
+        "success": True,
+        "prato": {"id": p["id"], "nome": p["nome"], "status": p["status"], "status_anterior": (p["dados"].get("remocao") or {}).get("status_anterior")},
+        "reservas_liberadas": out["reservas_liberadas"],
+        "compras_canceladas": out["compras_canceladas"],
         "orcamento": store.orcamento(),
-        "nota": "Lembre a Dona Maria de lançar as compras reais com despensa_atualizar(compra=...) quando ela voltar do mercado.",
+        "nota": "Compra real já lançada com despensa_atualizar(compra=...) não é desfeita: o estoque e o custo continuam na despensa.",
     }
 
 
@@ -610,20 +814,26 @@ def cardapio_registrar(args: dict) -> dict:
 def cardapio_consultar(args: dict) -> dict:
     store = Store()
     pratos = store.pratos()
-    aceitos = []
-    em_analise = []
+    aceitos, em_analise, removidos = [], [], []
     for p in pratos:
         resumo = {"id": p["id"], "nome": p["nome"], "porcoes": p["porcoes"], "cmv_por_porcao": p["cmv_porcao"], "preco_venda": p["preco_venda"], "status": p["status"]}
         if p["status"] == "aceito" and p["preco_venda"]:
             resumo["lucro_por_porcao"] = costing.avaliar_preco(p["preco_venda"], p["cmv_porcao"] or 0)["lucro"]
+            resumo["reservas"] = [{k: r[k] for k in ("ingrediente", "quantidade")} for r in store.reservas_do_prato(p["id"])]
             aceitos.append(resumo)
+        elif p["status"] == "removido":
+            removidos.append(resumo)
         else:
             em_analise.append(resumo)
     perfil = store.perfil()
+    reservado = [{"ingrediente": i["nome"], "estoque": i["estoque_legivel"], "reservado": i["reservado_legivel"], "disponivel": i["disponivel_legivel"]}
+                 for i in store.ingredientes() if i.get("reservado_base")]
     return {
         "success": True,
         "cardapio": aceitos,
         "pratos_em_analise": em_analise,
+        "pratos_removidos": removidos,
+        "estoque_reservado": reservado,
         "receitas_conferidas": store.receitas(),
         "orcamento": store.orcamento(),
         "perfil_resumo": {"equipamentos": perfil.get("equipamentos"), "restricoes": perfil.get("restricoes"), "tecnicas": perfil.get("tecnicas")},
@@ -707,38 +917,46 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "prato_calcular_cmv": {
         "name": "prato_calcular_cmv",
-        "description": "Etapa 2.4: calcula o CMV do prato (Σ quantidade usada × custo unitário, custo unitário = preço pago ÷ quantidade comprada, incluindo compras complementares), o CMV por porção e a memória de cálculo linha a linha. Use depois que a Dona Maria aceitar a receita (gostou + tem equipamentos + técnicas + ingredientes garantidos). Pode reaproveitar uma receita conferida via receita_id.",
+        "description": "Etapa 2.4: calcula o CMV do prato (Σ quantidade usada × custo unitário, custo unitário = preço pago ÷ quantidade comprada, incluindo compras complementares), o CMV por porção e a memória de cálculo linha a linha. Exige uma receita conferida (receita_id) e reavalia perfil da cozinha, despensa disponível e orçamento: com qualquer pendência devolve bloqueado=true com 'bloqueios' e 'proximos_passos' em vez do CMV. Resolva-os (clarify + perfil_cozinha_salvar, despensa_atualizar) e chame de novo com o mesmo receita_id.",
         "parameters": {"type": "object", "properties": {
-            "nome": {"type": "string", "description": "Nome do prato"},
-            "porcoes": {"type": "number", "description": "Quantas porções a receita rende (obrigatório para CMV por porção)"},
+            "receita_id": {"type": "integer", "description": "id devolvido por receita_conferir_ingredientes (obrigatório)"},
+            "nome": {"type": "string", "description": "Opcional: nome do prato (padrão: nome da receita)"},
+            "porcoes": {"type": "number", "description": "Opcional: porções que a receita rende (padrão: porções da receita conferida)"},
             "ingredientes": _ING_SCHEMA,
-            "receita_id": {"type": "integer", "description": "Opcional: id devolvido por receita_conferir_ingredientes para reaproveitar os ingredientes"},
-        }, "required": ["nome", "porcoes"]},
+        }, "required": ["receita_id"]},
     },
     "preco_sugerir": {
         "name": "preco_sugerir",
-        "description": "Monta o preço de venda no delivery com taxa de 10% sobre a venda (Dona Maria recebe 0,90×P): preço mínimo (CMV÷0,90), 2–3 cenários de margem com a conta aberta e, se pedido, a simulação de preços que ela sugerir. Apresente os cenários e deixe ELA decidir.",
+        "description": "Monta o preço de venda no delivery com taxa de 10% sobre a venda (Dona Maria recebe 0,90×P): preço mínimo (CMV÷0,90), 2–3 cenários de margem com a conta aberta e, se pedido, a simulação de preços que ela sugerir. Exige prato_id de prato_calcular_cmv: o CMV calculado pela tool é o que vale. Apresente os cenários e deixe ELA decidir.",
         "parameters": {"type": "object", "properties": {
-            "cmv_por_porcao": {"type": "number", "description": "CMV por porção em R$ (de prato_calcular_cmv)"},
-            "prato_id": {"type": "integer", "description": "Opcional: id do prato calculado"},
+            "prato_id": {"type": "integer", "description": "id do prato devolvido por prato_calcular_cmv (obrigatório)"},
+            "cmv_por_porcao": {"type": "number", "description": "Opcional: ignorado se diferir do CMV calculado para o prato"},
             "taxa_plataforma": {"type": "number", "description": "Taxa da plataforma (padrão 0.10)"},
             "margens": {"type": "array", "items": {"type": "number"}, "description": "Opcional: margens-alvo sobre o valor recebido, ex.: [0.3, 0.5, 0.65]"},
             "precos_para_simular": {"type": "array", "items": {"type": "number"}, "description": "Opcional: preços que a Dona Maria quer testar, ex.: [25, 29.9]"},
             "arredondar_para": {"type": "number", "description": "Arredondamento do preço sugerido (padrão 0.50)"},
-        }},
+        }, "required": ["prato_id"]},
     },
     "cardapio_registrar": {
         "name": "cardapio_registrar",
-        "description": "Registra a decisão da Dona Maria: prato aceito com o preço escolhido por ela. Confirma as compras complementares no orçamento (abate dos R$ restantes). Chame só depois que ela escolher o preço explicitamente.",
+        "description": "Registra a decisão da Dona Maria: prato aceito com o preço escolhido por ela. Reavalia o prato contra o estado atual e RECUSA (bloqueado=true, com 'bloqueios') se faltar requisito de equipamento/técnica/perfil, se houver pendência de ingrediente, se as compras não couberem no orçamento ou se CMV/compras mudaram desde a apresentação. Quando aceita, numa operação só: reserva na despensa o que o prato usa e compromete as compras no orçamento (abate dos R$ restantes). Repetir para o mesmo prato não duplica nada. Chame só depois que ela escolher o preço explicitamente.",
         "parameters": {"type": "object", "properties": {
             "prato_id": {"type": "integer", "description": "id devolvido por prato_calcular_cmv"},
             "preco_escolhido": {"type": "number", "description": "Preço de venda escolhido pela Dona Maria"},
             "confirmar_compras": {"type": "boolean", "description": "false para registrar o prato sem comprometer o orçamento ainda"},
         }, "required": ["prato_id", "preco_escolhido"]},
     },
+    "cardapio_remover": {
+        "name": "cardapio_remover",
+        "description": "Tira um prato do cardápio (ela desistiu, mudou de ideia, ou o prato precisa ser refeito): libera o estoque que estava reservado para ele e cancela as compras comprometidas, devolvendo o valor ao orçamento. Compra real já lançada com despensa_atualizar não é desfeita.",
+        "parameters": {"type": "object", "properties": {
+            "prato_id": {"type": "integer", "description": "id do prato (ver cardapio_consultar)"},
+            "motivo": {"type": "string", "description": "Opcional: por que saiu (ex.: 'ela preferiu o estrogonofe')"},
+        }, "required": ["prato_id"]},
+    },
     "cardapio_consultar": {
         "name": "cardapio_consultar",
-        "description": "Situação atual: pratos aceitos no cardápio (com preço e lucro por porção), pratos em análise, receitas conferidas, orçamento restante e resumo do perfil da cozinha. Use para retomar uma conversa ou fechar a sessão.",
+        "description": "Situação atual: pratos aceitos no cardápio (com preço, lucro por porção e o estoque reservado para cada um), pratos em análise, pratos removidos, estoque reservado por ingrediente, receitas conferidas, orçamento restante e resumo do perfil da cozinha. Use para retomar uma conversa ou fechar a sessão.",
         "parameters": {"type": "object", "properties": {}},
     },
 }
@@ -753,5 +971,6 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "prato_calcular_cmv": prato_calcular_cmv,
     "preco_sugerir": preco_sugerir,
     "cardapio_registrar": cardapio_registrar,
+    "cardapio_remover": cardapio_remover,
     "cardapio_consultar": cardapio_consultar,
 }

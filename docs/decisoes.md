@@ -67,7 +67,7 @@ Registro curto, no estilo ADR, das decisões que moldaram o projeto. O README tr
 
 **Por que desligar o `tool_search`.** O Hermes, por padrão, esconde as tools de plugin atrás de um meta-tool de busca (`tool_search`): o modelo vê só as ~7 tools "core" e precisa procurar as outras. Nos testes, o Qwen3-8B respondia "quanto custa o arroz na despensa?" com `web_search` em 3 de 3 tentativas porque simplesmente não enxergava `despensa_buscar`. Com o bridge desligado e as 18 tools no prompt (~14 KB de schema, irrelevante em 64k), o comportamento corrige. Foi o bug mais importante encontrado no dia 1, e só apareceu lendo o `agent.log` (`tool_search activated (tier 1): 7 core/visible tools kept, 11 deferred`).
 
-**Consequências.** Sem terminal nem acesso a arquivos no agente, mesmo via API server. O fluxo "não deixe ela comprar antes de confirmar que consegue cozinhar" vira um veredito explícito da tool (`viavel` / `precisa_confirmar` / `inviavel_por_enquanto`).
+**Consequências.** Sem terminal nem acesso a arquivos no agente, mesmo via API server. O fluxo "não deixe ela comprar antes de confirmar que consegue cozinhar" vira um veredito explícito da tool (`viavel` / `precisa_confirmar` / `inviavel_por_enquanto`); desde a decisão 11 esse veredito também trava CMV, preço e registro.
 
 ## 8. Memória: curta e com dono
 
@@ -84,3 +84,19 @@ Registro curto, no estilo ADR, das decisões que moldaram o projeto. O README tr
 - **Mojo**: não há cálculo pesado no problema; a interoperação Python↔Mojo está em beta e exigiria o compilador na imagem. Cabe como bônus, não como base.
 - **Frontend React**: a TUI e o webapp do Hermes já mostram o agente; o API server (8642) está ligado e com CORS para um React futuro.
 - **Firecrawl self-hosted**: resolveria extração com JavaScript pesado, mas custa Redis + Playwright; o extrator local com schema.org cobre os sites de receita.
+
+## 11. Travas no backend e reserva de estoque
+
+**Contexto.** Até aqui o veredito da conferência (`viavel` / `precisa_confirmar` / `inviavel_por_enquanto`) era informativo: `prato_calcular_cmv` e `cardapio_registrar` aceitavam qualquer prato, e um modelo de 8B que "concluísse" na conversa que estava tudo certo conseguia registrar um prato com forno e técnicas ainda sem resposta. Aceitar um prato também não tocava a despensa: dois pratos com 1,5 kg de frango cada passavam contra os 2 kg da planilha; só o orçamento era compartilhado.
+
+**Decisão.** Um veredito único (`_avaliar` em `tools.py`) é calculado pela conferência, pelo CMV e pelo registro, sempre contra o estado **atual** salvo no SQLite (perfil, despensa disponível, orçamento restante), nunca contra o texto da conversa:
+
+- `prato_calcular_cmv` exige `receita_id` de uma receita conferida (é dela que vêm equipamentos e técnicas necessários) e recusa com `bloqueado: true` + `bloqueios` + `proximos_passos` se o veredito não for `viavel`. Numa recusa nada é gravado.
+- `preco_sugerir` exige `prato_id`; o CMV usado é o calculado pela tool (um `cmv_por_porcao` avulso é ignorado, com aviso).
+- `cardapio_registrar` reavalia o prato, recusa se não estiver `viavel` e recusa com `numeros_mudaram` se CMV por porção ou total de compras diferirem do que foi apresentado (o preço foi escolhido em cima daqueles números). Quando aceita, numa transação só: status, preço, compras comprometidas e **reservas** (tabela `reservas`: o que o prato usa da despensa). É idempotente por `prato_id`: compras e reservas anteriores do mesmo prato são substituídas, então retry ou troca de preço não duplicam nada.
+- Disponibilidade = estoque − reservas dos pratos `aceito`. Candidatas não consomem estoque; a conferência do segundo prato já mostra `reservado_por_outros_pratos` e `falta` descontados.
+- `cardapio_remover` (11ª tool) tira o prato do cardápio, libera as reservas e cancela as compras comprometidas. Compra real já lançada com `despensa_atualizar(compra=...)` não é desfeita.
+
+**O que ficou de fora.** Dinheiro continua em `float` com arredondamento a dois centavos (Decimal seria o próximo passo), e não há versionamento de plano nem chave de idempotência explícita: a idempotência vem de `prato_id` e da substituição em bloco. O backend também não distingue compra real de inventada em `despensa_atualizar(compra=...)`: na prova com o modelo real, mandado "registrar sem perguntar", o Qwen3-8B tentou destravar pendências de preço lançando compras fictícias (a trava segurou, nada entrou no cardápio); a proibição ficou em `AGENTS.md` e na skill.
+
+**Consequências.** O modelo não consegue "pular a etapa 2" nem por prompt: o caminho até o preço passa obrigatoriamente por perfil completo, equipamentos/técnicas da receita confirmados, ingredientes sem pendência e compras dentro do saldo. Pratos aceitos antes desta versão não têm reserva; basta registrá-los de novo com `cardapio_registrar` (que agora reavalia). `GateTests` e o fluxo completo em `tests/test_costing_and_tools.py` cobrem recusa por perfil pendente, forno ausente, orçamento estourado, CMV sem receita, preço sem prato, números mudados, retry sem duplicar e remoção liberando reserva.

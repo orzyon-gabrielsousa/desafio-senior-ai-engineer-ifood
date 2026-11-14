@@ -25,7 +25,8 @@ Sempre que a Dona Maria quiser montar ou revisar o cardápio: descobrir o que co
 | 2.1 | `web_search` → `web_extract` | receitas reais com fonte; extração traz ingredientes estruturados |
 | 2.2 | `perfil_cozinha_consultar` → `clarify` → `perfil_cozinha_salvar` | checklist de equipamentos, técnicas e restrições |
 | 2.3 | `despensa_buscar`, `receita_conferir_ingredientes`, `despensa_atualizar` | o que tem, o que falta, custo, cabe no orçamento |
-| 2.4 | `prato_calcular_cmv` → `preco_sugerir` → `cardapio_registrar` | CMV com memória de cálculo, cenários de preço, decisão dela |
+| 2.4 | `prato_calcular_cmv` → `preco_sugerir` → `cardapio_registrar` | CMV com memória de cálculo, cenários de preço, decisão dela; só funcionam com veredito `viavel` (senão devolvem `bloqueado: true` + `bloqueios`) |
+| desistiu | `cardapio_remover` | tira o prato do cardápio: libera o estoque reservado e devolve o orçamento |
 | sempre | `cardapio_consultar`, `memory` | retomar contexto; guardar fatos duradouros |
 
 ## Procedimento
@@ -38,8 +39,8 @@ Sempre que a Dona Maria quiser montar ou revisar o cardápio: descobrir o que co
    - `precisa_confirmar`: resolva `pendencias`, `perfil_pendente`, `nao_informado` e `parcial` perguntando a ela.
    - `inviavel_por_enquanto`: explique o motivo (equipamento/técnica faltando ou orçamento) e proponha substituição ou outra receita.
    Para ingrediente que não está na despensa, pesquise um preço de mercado (`web_search` "preço creme de leite 200g") ou pergunte a ela, e repasse `preco_compra_estimado`, `quantidade_compra`, `unidade_compra`. Se um item é vendido por unidade sem peso (cobertura de chocolate), pergunte o peso do pote e registre com `despensa_atualizar(conteudo_por_unidade=...)`.
-5. **Aceite e CMV (2.4).** Confirme explicitamente: "Então fechamos o frango com batata? Você tem forno, já fez esse tipo de assado e vamos comprar só o creme de leite." Com o sim, chame `prato_calcular_cmv(nome, porcoes, receita_id=...)`. Explique o CMV com a `memoria_de_calculo`: cada linha é quantidade usada × custo unitário, e o custo unitário é o preço total pago ÷ quantidade comprada da planilha. Mostre CMV da receita e por porção.
-6. **Preço.** Chame `preco_sugerir(cmv_por_porcao, prato_id)`. Apresente: a taxa de 10% (de cada R$ 10 vendidos ela recebe R$ 9), o preço mínimo (lucro zero) e os cenários com preço, quanto ela recebe e lucro por porção. Se ela sugerir um preço, simule com `precos_para_simular`. Pergunte qual ela quer adotar. **Ela decide.** Registre com `cardapio_registrar(prato_id, preco_escolhido)` e diga quanto sobrou do orçamento.
+5. **Aceite e CMV (2.4).** Confirme explicitamente: "Então fechamos o frango com batata? Você tem forno, já fez esse tipo de assado e vamos comprar só o creme de leite." Com o sim, chame `prato_calcular_cmv(receita_id=...)`. Se voltar `bloqueado: true`, ainda não há CMV: leia `bloqueios` e `proximos_passos`, resolva com ela (clarify + `perfil_cozinha_salvar`, `despensa_atualizar`) e chame de novo com o mesmo `receita_id`. Com `success: true`, explique o CMV com a `memoria_de_calculo`: cada linha é quantidade usada × custo unitário, e o custo unitário é o preço total pago ÷ quantidade comprada da planilha. Mostre CMV da receita e por porção.
+6. **Preço.** Chame `preco_sugerir(prato_id)` (o CMV usado é o calculado pela tool). Apresente: a taxa de 10% (de cada R$ 10 vendidos ela recebe R$ 9), o preço mínimo (lucro zero) e os cenários com preço, quanto ela recebe e lucro por porção. Se ela sugerir um preço, simule com `precos_para_simular`. Pergunte qual ela quer adotar. **Ela decide.** Registre com `cardapio_registrar(prato_id, preco_escolhido)`: ele reavalia o prato contra o estado atual, reserva na despensa o que o prato usa e abate as compras do orçamento. Se recusar com `numeros_mudaram` (outro prato reservou estoque), recalcule o CMV, apresente de novo e peça a escolha outra vez. Diga quanto sobrou do orçamento. Se ela desistir de um prato aceito, `cardapio_remover(prato_id)`.
 7. **Fechamento.** `cardapio_consultar` para resumir cardápio, compras e orçamento. Salve na memória as decisões. Pergunte se quer montar mais um prato.
 
 ## Exemplo de chamada (2.3)
@@ -67,9 +68,12 @@ Sempre que a Dona Maria quiser montar ou revisar o cardápio: descobrir o que co
 - Ingredientes ambíguos (feijão carioca ou preto? mussarela ou parmesão?) aparecem com `confiavel: false` em `despensa_buscar`: pergunte.
 - O modelo não deve calcular CMV de cabeça. Sempre pela tool, sempre mostrando a memória de cálculo.
 - Nunca registre no cardápio sem ela escolher o preço explicitamente.
+- Não tente contornar um `bloqueado: true`: a tool não vai aceitar; o caminho é resolver o bloqueio com ela e salvar a resposta.
+- Pendência de preço não se resolve inventando compra: `despensa_atualizar(compra=...)` só registra compra que ela fez de verdade. Para o que falta, pesquise o preço ou pergunte a ela e repasse em `preco_compra_estimado` / `quantidade_compra` / `unidade_compra`.
+- Candidatas não consomem estoque; só `cardapio_registrar` reserva. Por isso a conferência do segundo prato já mostra `reservado_por_outros_pratos` e `tem_na_despensa` descontado.
 
 ## Verificação
 
 - `receita_conferir_ingredientes` sem `pendencias` e com `veredito: viavel` antes do aceite.
-- `prato_calcular_cmv` com `memoria_de_calculo` apresentada à Dona Maria.
-- `cardapio_consultar` mostrando o prato como `aceito`, com preço, e o orçamento abatido das compras.
+- `prato_calcular_cmv` com `success: true` (sem `bloqueado`) e `memoria_de_calculo` apresentada à Dona Maria.
+- `cardapio_consultar` mostrando o prato como `aceito`, com preço, o orçamento abatido das compras e o estoque do prato em `estoque_reservado`.
