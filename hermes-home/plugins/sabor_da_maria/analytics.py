@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from . import cozinha
 from . import negocio as negocio_mod
 from .units import norm_text
 
@@ -284,8 +285,9 @@ def e_prato(nome: str) -> bool:
     return bool(n) and n in nomes_de_pratos()
 
 
-def topo_para_painel(negocio: Optional[dict[str, Any]], quantos: int = 3) -> str:
-    """Linha curta para o painel do turno: os mais vendidos para a loja, com preço médio."""
+def topo_para_painel(negocio: Optional[dict[str, Any]], quantos: int = 3, perfil: Optional[dict[str, Any]] = None) -> str:
+    """Linha curta para o painel do turno: os mais vendidos para a loja, com preço médio e, com a cozinha dela (``perfil``),
+    a marca dos que ela não consegue fazer."""
     try:
         r = consultar(negocio, "prioridade", quantos)
     except Exception:  # noqa: BLE001 - sem o Analytics a consultora ainda tem as tools
@@ -294,6 +296,12 @@ def topo_para_painel(negocio: Optional[dict[str, Any]], quantos: int = 3) -> str
     if not r["ranking"]:
         return ""
     onde = r["escopos_disponiveis"][0]["onde"] if r["escopos_disponiveis"] else "Brasil"
-    itens = "; ".join(f"{m['posicao']}) {m['prato']} (~R$ {m['preco_medio']:.2f})".replace(".", ",") for m in r["ranking"])
+    def marca(m: dict[str, Any]) -> str:
+        if perfil is None:
+            return ""
+        c = cozinha.conferir(m["prato"], [], perfil)
+        return " [NÃO dá na cozinha dela: " + "; ".join(f["precisa"] for f in c["falta"]) + "]" if c["status"] == "nao_da" else ""
+
+    itens = "; ".join(f"{m['posicao']}) {m['prato']} (~R$ {m['preco_medio']:.2f})".replace(".", ",") + marca(m) for m in r["ranking"])
     base = "prioridade pelo local da loja" if r["local_definido"] else "só país: loja sem localização"
     return f"Mais vendidos ({base}; {onde}; dados de exemplo): {itens}."

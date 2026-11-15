@@ -1,4 +1,4 @@
-"""API HTTP mínima da tela: carrinho, pratos, itens salvos, perfil do negócio e Analytics.
+"""API HTTP mínima da tela: carrinho, pratos, itens salvos, perfil do negócio, Minha cozinha e Analytics.
 
 Serviço pequeno, só stdlib, que usa o MESMO ``Store`` e o mesmo leitor de Analytics das tools do plugin:
 nenhuma regra é duplicada e a tela e a consultora enxergam os mesmos dados no mesmo SQLite. Quem o expõe
@@ -9,8 +9,11 @@ ao navegador é o nginx do playground (``/api/``); a porta não é publicada no 
 Rotas (JSON; erros voltam como ``{"erro": "..."}``):
 
     GET    /api/saude
-    GET    /api/estado                       orçamento + carrinho + salvos + perfil do negócio + opções de seleção
-    GET    /api/analytics?escopo=&limite=&categoria=    pratos mais vendidos, priorizados pelo lugar da loja
+    GET    /api/estado                       orçamento + carrinho + salvos + perfil do negócio + a cozinha dela + avisos do
+                                             carrinho (o que a cozinha dela não faz) + opções de seleção
+    GET    /api/analytics?escopo=&limite=&categoria=    pratos mais vendidos, priorizados pelo lugar da loja, cada um com
+                                             o que a cozinha dela faz e quanto cobrar para lucrar depois da taxa
+    GET    /api/precos?cmv=&preco=           quanto cobrar para um custo (CMV) dado, e o que sobra no preço do mercado
     POST   /api/carrinho/itens               {nome, preco_total, quantidade?, unidade?}   ingrediente avulso
     PATCH  /api/carrinho/itens/<id>          {quantidade}
     DELETE /api/carrinho/itens/<id>
@@ -21,6 +24,8 @@ Rotas (JSON; erros voltam como ``{"erro": "..."}``):
     POST   /api/salvos/<id>/carrinho         põe o item salvo no carrinho
     DELETE /api/salvos/<id>
     PUT    /api/negocio                      {tipo, vende[], publico?, observacoes?, estado?, cidade?, zona?}
+    PUT    /api/cozinha                      {equipamentos?: {id: true|false}, habilidades?: {id: sim|aprendendo|nao|null},
+                                              rotina?: {chave: valor|null}, remover?: [{grupo, chave}]}   (ids do catálogo)
 
 Item que não cabe no saldo volta 409 com o ``estado`` atual; entrada inválida, 400.
 """
@@ -35,7 +40,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import analytics
+from . import analytics, costing
+from . import cozinha as cozinha_mod
 from . import negocio as negocio_mod
 from .store import OrcamentoEstourado, Store
 
@@ -47,12 +53,15 @@ MAX_CORPO = 65_536
 def estado(store: Optional[Store] = None) -> dict[str, Any]:
     """Tudo o que a tela precisa numa chamada só."""
     store = store or Store()
+    perfil = store.perfil()
     return {
         "orcamento": store.carrinho_resumo(),
         "carrinho": store.carrinho_itens(),
+        "alertas": cozinha_mod.alertas_do_carrinho(store.carrinho_itens(), perfil),
         "salvos": store.salvos(),
         "negocio": store.negocio(),
-        "opcoes": negocio_mod.opcoes(),
+        "cozinha": store.cozinha(),
+        "opcoes": {**negocio_mod.opcoes(), "cozinha": cozinha_mod.opcoes()},
     }
 
 
@@ -96,7 +105,12 @@ def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str,
             return 200, estado(store)
         if rota == ["analytics"] and metodo == "GET":
             limite = int(_numero(consulta.get("limite", ["10"])[0], "limite"))
-            return 200, analytics.consultar(store.negocio(), consulta.get("escopo", ["prioridade"])[0], limite, consulta.get("categoria", [None])[0])
+            r = analytics.consultar(store.negocio(), consulta.get("escopo", ["prioridade"])[0], limite, consulta.get("categoria", [None])[0])
+            cozinha_mod.anotar_ranking(r["ranking"], store.perfil())
+            return 200, r
+        if rota == ["precos"] and metodo == "GET":
+            preco = consulta.get("preco", [""])[0]
+            return 200, costing.quanto_cobrar(_numero(consulta.get("cmv", [""])[0], "custo do prato"), _numero(preco, "preço") if preco else None)
         if rota == ["carrinho", "itens"] and metodo == "POST":
             dados = _objeto(corpo)
             store.carrinho_adicionar(
@@ -135,7 +149,10 @@ def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str,
         if rota == ["negocio"] and metodo == "PUT":
             store.negocio_salvar(_objeto(corpo))
             return 200, estado(store)
-        if rota and rota[0] in {"saude", "estado", "analytics", "carrinho", "salvos", "negocio"}:
+        if rota == ["cozinha"] and metodo == "PUT":
+            store.cozinha_salvar(_objeto(corpo))
+            return 200, estado(store)
+        if rota and rota[0] in {"saude", "estado", "analytics", "precos", "carrinho", "salvos", "negocio", "cozinha"}:
             return 405, {"erro": "método não permitido"}
         return 404, {"erro": "rota desconhecida"}
     except OrcamentoEstourado as exc:

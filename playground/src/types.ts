@@ -90,12 +90,52 @@ export type Negocio = {
   zona: string;
 };
 
+// ---- Minha cozinha: o que ela tem, o que sabe fazer e a rotina (o mesmo perfil que a consultora lê e grava).
+
+export type Nivel = "sim" | "aprendendo" | "nao";
+export type OpcaoCozinha = { id: string; label: string; dica: string };
+export type ValorRotina = string | number;
+
+export type OpcoesCozinha = {
+  equipamentos: OpcaoCozinha[];
+  utensilios: OpcaoCozinha[];
+  habilidades: OpcaoCozinha[];
+  niveis: Opcao[];
+  bocas: number[];
+  rotina: { id: string; label: string; opcoes: { valor: ValorRotina; label: string }[] }[];
+};
+
+/** O que a conversa gravou e o catálogo não tem ("massa fresca", observações): a tela mostra e deixa apagar. */
+export type Outro = { grupo: "equipamentos" | "tecnicas" | "restricoes" | "observacoes"; chave: string; nome: string; texto: string };
+
+export type Cozinha = {
+  /** id do catálogo → tem (true, ou o número de bocas do fogão) ou não tem (false). Ausente = ainda não respondeu. */
+  equipamentos: Record<string, boolean | number>;
+  habilidades: Record<string, Nivel>;
+  rotina: Record<string, ValorRotina>;
+  resumo: { total: number; respondidos: number; tem: string[]; nao_tem: string[]; sem_resposta: string[]; sabe: string[]; aprendendo: string[]; nao_sabe: string[] };
+  outros: Outro[];
+};
+
+export type NovaCozinha = {
+  equipamentos?: Record<string, boolean | number>;
+  habilidades?: Record<string, Nivel | null>;
+  rotina?: Record<string, ValorRotina | null>;
+  remover?: { grupo: Outro["grupo"]; chave: string }[];
+};
+
+/** Aviso da conferência com a cozinha: não dá (falta algo que ela disse não ter), atenção (habilidade), confirmar (falta responder). */
+export type NivelAviso = "nao_da" | "atencao" | "confirmar";
+export type AlertaCozinha = { prato: string | null; item_id: number | null; nivel: NivelAviso; mensagens: string[] };
+
 export type Estado = {
   orcamento: Orcamento;
   carrinho: ItemCarrinho[];
+  alertas: AlertaCozinha[];
   salvos: Salvos;
   negocio: Negocio | null;
-  opcoes: { tipos: Opcao[]; vende: Opcao[]; estados: OpcaoEstado[]; zonas: Opcao[] };
+  cozinha: Cozinha;
+  opcoes: { tipos: Opcao[]; vende: Opcao[]; estados: OpcaoEstado[]; zonas: Opcao[]; cozinha: OpcoesCozinha };
 };
 
 export type NovoItem = {
@@ -154,6 +194,33 @@ export type MaisVendido = {
   /** Visão "para a sua loja": prioridade (0–100) e a posição em cada escopo em que o prato aparece. */
   prioridade?: number;
   onde?: { escopo: EscopoId; posicao: number; indice: number }[];
+  /** O prato conferido com a cozinha dela (ficha em prompts/base-de-conhecimento/cozinha-e-equipamentos). */
+  cozinha?: ConferenciaCozinha;
+  /** Quanto cobrar para lucrar depois da taxa (custo típico de exemplo). */
+  preco?: QuantoCobrar | null;
+};
+
+export type StatusCozinha = NivelAviso | "ok" | "sem_ficha";
+export type ConferenciaCozinha = {
+  prato: string | null;
+  ficha: boolean;
+  status: StatusCozinha;
+  falta: { origem: string; de: string; precisa: string; para: string }[];
+  mensagens: string[];
+  observacao: string;
+};
+
+export type Cenario = { nome: string; margem: number; preco: number; recebe: number; lucro: number };
+export type Mercado = { preco: number; taxa_plataforma: number; recebe_liquido: number; cmv: number; lucro: number; viavel: boolean };
+export type QuantoCobrar = {
+  cmv: number;
+  taxa: number;
+  /** O menor preço sem prejuízo: custo ÷ 0,90, arredondado para cima ao centavo. */
+  preco_minimo: number;
+  cenarios: Cenario[];
+  mercado: Mercado | null;
+  custo_exemplo?: boolean;
+  aviso?: string;
 };
 
 export type Analytics = {

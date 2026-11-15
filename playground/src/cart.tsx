@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { BookmarkIcon, CartIcon, CloseIcon, MinusIcon, PlusIcon, SparkIcon, TrashIcon } from "./icons";
+import { AlertIcon, BookmarkIcon, CartIcon, CloseIcon, MinusIcon, PlusIcon, SparkIcon, TrashIcon } from "./icons";
 import { brl, chave, lerNumero, quantidade } from "./lib/format";
 import { agrupar, contarItens } from "./lib/loja";
 import type { GrupoPrato } from "./lib/loja";
 import { Sheet } from "./sheet";
-import type { Acao, CarrinhoAcoes, Estado, ItemCarrinho, LinhaPrato, Salvo } from "./types";
+import type { Acao, AlertaCozinha, CarrinhoAcoes, Estado, ItemCarrinho, LinhaPrato, Salvo } from "./types";
 
 const UNIDADES = ["un", "kg", "g", "L", "ml", "maço", "dúzia", "pacote"];
 const MAX_LINHAS = 40;
@@ -25,6 +25,23 @@ function passo(item: ItemCarrinho): number {
 
 function aComprar(linhas: LinhaPrato[]): number {
   return linhas.reduce((soma, linha) => soma + (linha.ja_tem ? 0 : linha.preco_total), 0);
+}
+
+/** O que a cozinha dela não faz (ou ainda não confirmou) para este prato ou ingrediente: vem da ficha em /prompts e do que ela marcou em Minha cozinha. */
+function AvisoCozinha({ alerta, onCozinha }: { alerta: AlertaCozinha; onCozinha: () => void }) {
+  return (
+    <div className={`aviso-cozinha ${alerta.nivel}`} role="note">
+      <AlertIcon />
+      <div>
+        {alerta.mensagens.map((mensagem) => (
+          <p key={mensagem}>{mensagem}</p>
+        ))}
+        <button type="button" className="link-btn" onClick={onCozinha}>
+          Abrir Minha cozinha
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function Linha({
@@ -94,7 +111,15 @@ function OrcamentoCard({ estado }: { estado: Estado | null }) {
 }
 
 /** Prato aberto: cada ingrediente com a quantidade e o valor, o total do prato e o que realmente sai do saldo. */
-function PratoCard({ grupo, salvo, ocupado, executar, acoes }: Comum & { grupo: GrupoPrato; salvo: boolean }) {
+function PratoCard({
+  grupo,
+  salvo,
+  ocupado,
+  executar,
+  acoes,
+  alertas,
+  onCozinha,
+}: Comum & { grupo: GrupoPrato; salvo: boolean; alertas: AlertaCozinha[]; onCozinha: () => void }) {
   const parcial = grupo.aComprar < grupo.valor - 0.004;
   const linhas: LinhaPrato[] = grupo.linhas.map((linha) => ({
     nome: linha.nome,
@@ -115,6 +140,9 @@ function PratoCard({ grupo, salvo, ocupado, executar, acoes }: Comum & { grupo: 
         </div>
         <span className="prato-total">{brl(grupo.valor)}</span>
       </header>
+      {alertas.map((alerta) => (
+        <AvisoCozinha key={`${alerta.nivel}-${alerta.mensagens[0]}`} alerta={alerta} onCozinha={onCozinha} />
+      ))}
       <ul className="linhas">
         {grupo.linhas.map((linha) => (
           <Linha
@@ -163,7 +191,15 @@ function PratoCard({ grupo, salvo, ocupado, executar, acoes }: Comum & { grupo: 
   );
 }
 
-function ItemAvulso({ item, salvo, ocupado, executar, acoes }: Comum & { item: ItemCarrinho; salvo: boolean }) {
+function ItemAvulso({
+  item,
+  salvo,
+  ocupado,
+  executar,
+  acoes,
+  alertas,
+  onCozinha,
+}: Comum & { item: ItemCarrinho; salvo: boolean; alertas: AlertaCozinha[]; onCozinha: () => void }) {
   return (
     <li className="cart-item">
       <div className="cart-item-main">
@@ -175,6 +211,9 @@ function ItemAvulso({ item, salvo, ocupado, executar, acoes }: Comum & { item: I
         </small>
       </div>
       <span className="cart-price">{brl(item.preco_total)}</span>
+      {alertas.map((alerta) => (
+        <AvisoCozinha key={`${alerta.nivel}-${alerta.mensagens[0]}`} alerta={alerta} onCozinha={onCozinha} />
+      ))}
       <div className="stepper">
         <button
           type="button"
@@ -547,9 +586,10 @@ type CartSheetProps = {
   acoes: CarrinhoAcoes;
   onClose: () => void;
   onAsk: () => void;
+  onCozinha: () => void;
 };
 
-export function CartSheet({ estado, acoes, onClose, onAsk }: CartSheetProps) {
+export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha }: CartSheetProps) {
   const [aba, setAba] = useState<"carrinho" | "salvos">("carrinho");
   const [forma, setForma] = useState<"ingrediente" | "prato">("ingrediente");
   const [erro, setErro] = useState<string | null>(null);
@@ -587,6 +627,7 @@ export function CartSheet({ estado, acoes, onClose, onAsk }: CartSheetProps) {
     setErro(texto);
   };
   const comum: Comum = { ocupado, executar, acoes };
+  const alertas = estado?.alertas ?? [];
 
   return (
     <Sheet titleId="carrinho-titulo" title="Carrinho" icon={<CartIcon />} onClose={onClose} wide>
@@ -614,7 +655,14 @@ export function CartSheet({ estado, acoes, onClose, onAsk }: CartSheetProps) {
 
           {pratos.length > 0 ? <h3 className="sheet-label">Pratos ({pratos.length})</h3> : null}
           {pratos.map((grupo) => (
-            <PratoCard key={grupo.nome} grupo={grupo} salvo={nomesSalvos.pratos.has(chave(grupo.nome))} {...comum} />
+            <PratoCard
+              key={grupo.nome}
+              grupo={grupo}
+              salvo={nomesSalvos.pratos.has(chave(grupo.nome))}
+              alertas={alertas.filter((alerta) => alerta.prato === grupo.nome)}
+              onCozinha={onCozinha}
+              {...comum}
+            />
           ))}
 
           {avulsos.length > 0 ? (
@@ -622,7 +670,14 @@ export function CartSheet({ estado, acoes, onClose, onAsk }: CartSheetProps) {
               <h3 className="sheet-label">Ingredientes avulsos ({avulsos.length})</h3>
               <ul className="cart-list">
                 {avulsos.map((item) => (
-                  <ItemAvulso key={item.id} item={item} salvo={nomesSalvos.ingredientes.has(chave(item.nome))} {...comum} />
+                  <ItemAvulso
+                    key={item.id}
+                    item={item}
+                    salvo={nomesSalvos.ingredientes.has(chave(item.nome))}
+                    alertas={alertas.filter((alerta) => alerta.item_id === item.id)}
+                    onCozinha={onCozinha}
+                    {...comum}
+                  />
                 ))}
               </ul>
             </>

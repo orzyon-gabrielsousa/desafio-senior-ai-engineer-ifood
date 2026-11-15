@@ -213,7 +213,7 @@ class GateTests(StoreTestCase):
     def test_missing_oven_blocks_cmv(self):
         self._perfil_completo()
         call("perfil_cozinha_salvar", equipamentos={"forno": False})
-        receita = call("receita_conferir_ingredientes", nome="Lasanha", porcoes=6,
+        receita = call("receita_conferir_ingredientes", nome="Carne moída gratinada", porcoes=6,
                        ingredientes=[{"nome": "carne moída", "quantidade": 500, "unidade": "g"}],
                        equipamentos_necessarios=["forno"], tecnicas_necessarias=["refogado"])
         self.assertEqual(receita["veredito"], "inviavel_por_enquanto")

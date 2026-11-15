@@ -1,6 +1,6 @@
-import type { Analytics, Estado, Negocio, NovoItem, NovoPrato, NovoSalvo, Visao } from "../types";
+import type { Analytics, Estado, Negocio, NovaCozinha, NovoItem, NovoPrato, NovoSalvo, QuantoCobrar, Visao } from "../types";
 
-// Carrinho, pratos salvos, perfil do negócio e Analytics moram no plugin; o nginx leva /api/ até o serviço `api`.
+// Carrinho, pratos salvos, perfil do negócio, Minha cozinha e Analytics moram no plugin; o nginx leva /api/ até o serviço `api`.
 
 export class ApiError extends Error {
   readonly status: number;
@@ -47,5 +47,9 @@ export const saveSalvo = (salvo: NovoSalvo) => chamar("POST", "/api/salvos", sal
 export const removeSalvo = (id: number) => chamar("DELETE", `/api/salvos/${id}`);
 export const salvoToCart = (id: number) => chamar("POST", `/api/salvos/${id}/carrinho`);
 export const saveNegocio = (negocio: Negocio) => chamar("PUT", "/api/negocio", negocio);
+export const saveCozinha = (cozinha: NovaCozinha) => chamar("PUT", "/api/cozinha", cozinha);
 export const getAnalytics = (visao: Visao, limite = 30) =>
   chamar<Analytics>("GET", `/api/analytics?escopo=${visao}&limite=${limite}`);
+/** Quanto cobrar para um custo (CMV) dado: a mesma conta da consultora, feita no backend. */
+export const getPrecos = (cmv: number, preco?: number) =>
+  chamar<QuantoCobrar>("GET", `/api/precos?cmv=${encodeURIComponent(String(cmv))}${preco ? `&preco=${encodeURIComponent(String(preco))}` : ""}`);

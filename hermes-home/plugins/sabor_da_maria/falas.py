@@ -223,6 +223,20 @@ def apoia_numero(valor: float, falas: list[Fala], *, minutos: bool = False) -> b
     return any(alvo in f.numeros for f in falas for alvo in alvos)
 
 
+_TEMPO = re.compile(r"\b(\d+(?:[.,]\d+)?|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez)\s*(horas?|h|minutos?|min)\b")
+
+
+def unidade_do_numero(valor: float, falas: list[Fala]) -> Optional[str]:
+    """``"h"`` ou ``"min"`` quando ela disse o número com a unidade ('2 horas', 'duas horas', '90 minutos'); ``None`` se não deu para saber."""
+    achadas: set[str] = set()
+    for f in falas:
+        for numero, unidade in _TEMPO.findall(norm_text(f.texto)):
+            n = float(_NUMEROS_POR_EXTENSO[numero]) if numero in _NUMEROS_POR_EXTENSO else float(numero.replace(",", "."))
+            if n == float(valor):
+                achadas.add("h" if unidade.startswith("h") else "min")
+    return achadas.pop() if len(achadas) == 1 else None
+
+
 def cobertura(texto: str, falas: list[Fala]) -> float:
     """Fração das palavras de conteúdo de ``texto`` que aparecem nas falas dela (para observações livres)."""
     radicais = {_radical(p) for p in _palavras(texto) if len(p) >= 4 and p not in _IGNORAR_EM_OBSERVACAO}

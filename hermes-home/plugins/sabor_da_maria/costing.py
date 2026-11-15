@@ -115,3 +115,26 @@ def cenarios_preco(
 
 def simular_precos(cmv_porcao: float, precos: Iterable[float], taxa: float = TAXA_PADRAO) -> list[dict]:
     return [avaliar_preco(float(p), float(cmv_porcao), taxa) for p in precos]
+
+
+def quanto_cobrar(cmv: float, preco_mercado: Optional[float] = None, taxa: float = TAXA_PADRAO,
+                  margens: Optional[Iterable[float]] = None) -> dict:
+    """Quanto cobrar para o delivery dar lucro depois da taxa: o que o Analytics e a calculadora da tela mostram.
+
+    * ``preco_minimo``: o menor preço sem prejuízo (CMV ÷ 0,90), arredondado PARA CIMA ao centavo, porque
+      arredondar para baixo deixaria meio centavo de prejuízo por prato.
+    * ``cenarios``: o preço para sobrar cada margem do que ela recebe (mesma conta e mesmo arredondamento de
+      R$ 0,50 do ``preco_sugerir``, então a tela e a consultora dão o mesmo número).
+    * ``mercado``: o que acontece se ela cobrar o preço médio que o mercado paga (``None`` sem preço).
+    """
+    cmv = float(cmv)
+    if not math.isfinite(cmv) or cmv <= 0:
+        raise ValueError("informe o custo do prato (CMV), maior que zero")
+    base = cenarios_preco(cmv, taxa, margens)
+    minimo = math.ceil(round(preco_minimo(cmv, taxa) * 100, 6)) / 100
+    cenarios = [{"nome": c["nome"], "margem": c["margem_alvo"], "preco": c["preco_sugerido"],
+                 "recebe": c["com_preco_sugerido"]["recebe_liquido"], "lucro": c["com_preco_sugerido"]["lucro"]}
+                for c in base["cenarios"]]
+    mercado = avaliar_preco(float(preco_mercado), cmv, taxa) if preco_mercado else None
+    return {"cmv": round(cmv, 2), "taxa": taxa, "preco_minimo": minimo, "cenarios": cenarios, "mercado": mercado,
+            "formula": base["formula"]}

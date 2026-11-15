@@ -85,6 +85,22 @@ export function ChartIcon() {
   );
 }
 
+export function KitchenIcon() {
+  return (
+    <Icon strokeWidth="1.8">
+      <path d="M6.6 14.2A3.7 3.7 0 0 1 7 7a4.6 4.6 0 0 1 5-3 4.6 4.6 0 0 1 5 3 3.7 3.7 0 0 1 .4 7.2M7 14.2V20h10v-5.8M7 17.2h10" />
+    </Icon>
+  );
+}
+
+export function AlertIcon() {
+  return (
+    <Icon strokeWidth="2">
+      <path d="M12 4.2 3.2 19.6h17.6zM12 10v4.4M12 17.2v.1" />
+    </Icon>
+  );
+}
+
 export function BookmarkIcon({ filled = false }: { filled?: boolean }) {
   return (
     <Icon strokeWidth="1.9" fill={filled ? "currentColor" : "none"}>

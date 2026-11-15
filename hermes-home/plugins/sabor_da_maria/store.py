@@ -4,7 +4,8 @@ Banco embutido (stdlib ``sqlite3``), sem serviço externo: cabe no mesmo volume
 do Hermes e sobrevive entre sessões. Tabelas:
 
 * ``ingredientes``  — despensa normalizada (estoque, custo unitário em R$/kg, R$/L ou R$/un)
-* ``perfil``        — equipamentos, técnicas e restrições operacionais elicitadas
+* ``perfil``        — equipamentos, utensílios, técnicas e restrições operacionais da cozinha: o que a consultora
+                      elicita na conversa e o que ela marca na tela Minha cozinha (o mesmo registro, ver cozinha.py)
 * ``receitas``      — candidatas conferidas (ingredientes, origem, pendências)
 * ``pratos``        — CMV calculado e, quando aceito, preço escolhido
 * ``compras``       — compras complementares planejadas/confirmadas/canceladas (orçamento)
@@ -33,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from . import cozinha as cozinha_mod
 from . import negocio as negocio_mod
 from .matching import best_matches
 from .units import format_base, norm_text, parse_pantry_unit
@@ -464,11 +466,28 @@ class Store:
                 if str(item).strip() and str(item).strip() not in lista:
                     lista.append(str(item).strip())
             atual["observacoes"] = lista
+        self._gravar_perfil(atual)
+        return atual
+
+    def _gravar_perfil(self, atual: dict[str, Any]) -> None:
         with _LOCK, self.connect() as conn:
             for chave in ("equipamentos", "tecnicas", "restricoes", "observacoes"):
                 conn.execute("INSERT INTO perfil(chave, valor, atualizado_em) VALUES(?,?,?) ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor, atualizado_em = excluded.atualizado_em",
                              (chave, json.dumps(atual.get(chave, {} if chave != "observacoes" else []), ensure_ascii=False), _now()))
-        return atual
+
+    # ------------------------------------------------------------------ minha cozinha
+    def cozinha(self) -> dict[str, Any]:
+        """A cozinha dela como a tela mostra: o catálogo (equipamentos, utensílios, habilidades, rotina) com o que está salvo,
+        o quanto já respondeu e o que a conversa gravou fora do catálogo. É o MESMO perfil que a consultora lê e grava."""
+        perfil = self.perfil()
+        return {**cozinha_mod.da_perfil(perfil), "resumo": cozinha_mod.resumo(perfil), "outros": cozinha_mod.outros(perfil)}
+
+    def cozinha_salvar(self, dados: Any) -> dict[str, Any]:
+        """Grava o que ela marcou em Minha cozinha (validado contra o catálogo). Só muda o que vier; o resto do perfil fica."""
+        limpo = cozinha_mod.normalizar(dados)
+        with _LOCK:
+            self._gravar_perfil(cozinha_mod.aplicar(self.perfil(), limpo))
+        return self.cozinha()
 
     # ------------------------------------------------------------------ receitas e pratos
     def salvar_receita(self, nome: str, fonte_url: Optional[str], porcoes: Optional[float], dados: dict[str, Any], status: str) -> int:

@@ -7,7 +7,7 @@ Cada handler recebe ``args: dict`` e devolve uma string JSON (contrato do
 As tools cobrem as quatro etapas do desafio:
 
 * 2.1/2.3  despensa_listar, despensa_buscar, despensa_atualizar, receita_conferir_ingredientes
-* 2.2      perfil_cozinha_consultar, perfil_cozinha_salvar (elicitação com checklist)
+* 2.2      perfil_cozinha_consultar, perfil_cozinha_salvar (elicitação com checklist; a tela Minha cozinha grava no mesmo perfil)
 * 2.4      prato_calcular_cmv, preco_sugerir, cardapio_registrar, cardapio_remover, cardapio_consultar
 * carrinho  carrinho_consultar, carrinho_adicionar, carrinho_adicionar_prato, carrinho_remover, carrinho_montar_da_receita, salvos_salvar
             (saldo = orçamento − carrinho; a tela da Dona Maria mexe no mesmo carrinho pela API)
@@ -28,7 +28,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
-from . import analytics, costing, falas
+from . import analytics, costing, cozinha, falas
 from . import negocio as negocio_mod
 from .matching import tokens
 from .store import OrcamentoEstourado, Store
@@ -80,18 +80,7 @@ def _num(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 def _nivel(value: Any) -> Optional[str]:
     """Interpreta respostas livres como sim / nao / parcial."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        return "sim" if value else "nao"
-    if isinstance(value, (int, float)):
-        return "sim" if value > 0 else "nao"
-    text = norm_text(str(value))
-    if text in {"nao", "n", "no", "false", "nenhum", "nenhuma", "nao tem", "quebrado", "quebrada", "nao funciona", "0", "nunca fiz", "nunca"}:
-        return "nao"
-    if any(p in text for p in ("mais ou menos", "aprend", "parcial", "pouco", "as vezes", "razoavel", "basico", "ja tentei")):
-        return "parcial"
-    return "sim"
+    return cozinha.nivel(value)
 
 
 # ----------------------------------------------------------------------------- perfil (2.2)
@@ -107,38 +96,16 @@ CHECKLIST: list[tuple[str, str, str]] = [
     ("restricoes", "energia", "A energia elétrica aí é estável para usar air fryer, liquidificador e geladeira sem susto?"),
 ]
 
-_EQUIPAMENTOS: list[tuple[str, tuple[str, ...]]] = [
-    ("fogao", ("fogao", "boca", "bocas", "cooktop")),
-    ("forno", ("forno",)),
-    ("panela_pressao", ("pressao",)),
-    ("air_fryer", ("air fryer", "airfryer", "fritadeira eletrica", "fritadeira sem oleo", "fritadeira a ar")),
-    ("liquidificador", ("liquidificador",)),
-    ("batedeira", ("batedeira",)),
-    ("micro_ondas", ("micro ondas", "microondas")),
-    ("freezer", ("freezer", "congelador")),
-    ("geladeira", ("geladeira",)),
-    ("processador", ("processador", "mixer", "multiprocessador")),
-    ("frigideira", ("frigideira",)),
-    ("panela_grande", ("panela grande", "caldeirao", "panelao")),
-    ("forma", ("forma", "assadeira", "travessa", "refratario", "tabuleiro")),
-    ("escorredor", ("escorredor",)),
-    ("ralador", ("ralador",)),
-    ("balanca", ("balanca",)),
-    ("espremedor", ("espremedor",)),
-    ("peneira", ("peneira",)),
-    ("rolo", ("rolo de massa", "rolo")),
-]
-
-
 def _equip_key(nome: str) -> str:
-    n = norm_text(nome)
-    for key, needles in _EQUIPAMENTOS:
-        if any(x in n for x in needles):
-            return key
-    return n.replace(" ", "_")
+    """O id do catálogo (cozinha.py) que o nome cita: 'fogão de 4 bocas' → fogao, 'assadeira' → forma. Fora do catálogo, o próprio nome."""
+    return cozinha.id_por_termos(nome, (cozinha.EQUIPAMENTO, cozinha.UTENSILIO)) or norm_text(nome).replace(" ", "_")
 
 
 def _equip_status(equipamentos: dict[str, Any], key: str) -> Optional[str]:
+    if key in cozinha.POR_ID:
+        achado = cozinha.estado_equipamento(equipamentos, key)  # o id, uma variante ou um nome antigo do mesmo item
+        if achado is not None:
+            return achado
     if key in equipamentos:
         return _nivel(equipamentos[key])
     for k, v in equipamentos.items():
@@ -157,7 +124,8 @@ def _tecnica_status(tecnicas: dict[str, Any], nome: str) -> Optional[str]:
             return _nivel(v)
         if kt and alvo_tok and len(kt & alvo_tok) / len(kt | alvo_tok) >= 0.5:
             return _nivel(v)
-    return None
+    habilidade = cozinha.habilidade_id(nome)  # a habilidade que ela marcou em Minha cozinha ('molho branco' → molhos)
+    return cozinha.estado_habilidade(tecnicas, habilidade) if habilidade else None
 
 
 def _pendencias_perfil(perfil: dict[str, Any]) -> list[dict[str, str]]:
@@ -168,7 +136,7 @@ def _pendencias_perfil(perfil: dict[str, Any]) -> list[dict[str, str]]:
             out.append({"grupo": grupo, "chave": chave, "pergunta": pergunta})
     if not perfil.get("tecnicas"):
         out.append({"grupo": "tecnicas", "chave": "tecnicas",
-                    "pergunta": "Quais técnicas você domina bem (ex.: massa fresca, molho branco, ponto de carne, fritura, assados)?"})
+                    "pergunta": "Quais técnicas você domina bem (ex.: massa fresca, molho béchamel, ponto da carne, fritura, assados)?"})
     return out
 
 
@@ -180,11 +148,15 @@ def perfil_cozinha_consultar(args: dict) -> dict:
     return {
         "success": True,
         "perfil": perfil,
+        "minha_cozinha": cozinha.texto_do_perfil(perfil),
         "pendencias": pend,
         "completo": not pend,
-        "orientacao": ("Antes de aceitar qualquer prato, pergunte o que está em 'pendencias' usando a tool clarify "
-                       "(até 5 perguntas por vez, com opções). Salve as respostas com perfil_cozinha_salvar."
-                       if pend else "Perfil completo para os itens essenciais; pergunte técnicas específicas conforme a receita."),
+        "perguntas_prontas": cozinha.perguntas_da_cozinha(pend),
+        "orientacao": ("A cozinha dela ainda não está completa. Faça as perguntas de 'perguntas_prontas' em texto, copiando-as (se você tiver a tool "
+                       "clarify, pode usá-la: até 5 por vez, com opções). O que ela já marcou na tela Minha cozinha não se pergunta de novo. "
+                       "Salve SÓ o que ela responder, com perfil_cozinha_salvar."
+                       if pend else "Cozinha completa para os itens essenciais: não pergunte de novo o que está salvo. Pergunte só técnicas ou "
+                                    "equipamentos específicos da receita, e salve a resposta."),
     }
 
 
@@ -199,10 +171,10 @@ _NEEDLES_RESTRICOES: dict[str, tuple[str, ...]] = {
 
 def _termos(grupo: str, chave: str) -> tuple[str, ...]:
     """Como ela diria isso: sinônimos do equipamento ou da restrição; para técnica, o próprio nome."""
-    if grupo == "equipamentos":
-        for key, needles in _EQUIPAMENTOS:
-            if key == chave:
-                return needles
+    if grupo == "equipamentos" and chave in cozinha.POR_ID:
+        return cozinha.termos_de(chave)
+    if grupo == "tecnicas" and cozinha.habilidade_id(chave.replace("_", " ")):
+        return (chave.replace("_", " "), *cozinha.termos_de(cozinha.habilidade_id(chave.replace("_", " ")) or ""))
     if grupo == "restricoes" and chave in _NEEDLES_RESTRICOES:
         return _NEEDLES_RESTRICOES[chave]
     return (chave.replace("_", " "),)
@@ -217,6 +189,22 @@ def _sem_apoio(grupo: str, chave: str, valor: Any, falas_dela: list[falas.Fala])
         if not falas.apoia_numero(float(valor), falas_dela, minutos=chave.endswith("_min")):
             return f"o número {valor:g} de {nome} não aparece no que ela disse"
     return None
+
+
+MAX_OBSERVACAO = 160
+
+
+def _tempo_em_minutos(chave: str, valor: Any, falas_dela: Optional[list[falas.Fala]]) -> tuple[Any, Optional[str]]:
+    """O campo é em minutos e o 8B manda o número da fala dela ('2 horas' vira 2, e a conferência de falas aceita o 2). Se ela disse
+    horas, converte (2 → 120); se disse minutos, vale; se não dá para saber, devolve o motivo para o modelo corrigir."""
+    if chave != "tempo_por_cozinhada_min" or isinstance(valor, bool) or not isinstance(valor, (int, float)) or not 0 < valor < 15:
+        return valor, None
+    unidade = falas.unidade_do_numero(valor, falas_dela) if falas_dela else None
+    if unidade == "h":
+        return round(valor * 60), None
+    if unidade == "min":
+        return valor, None
+    return valor, f"{valor:g} parece estar em horas: o campo é em MINUTOS (2 horas = 120, 90 minutos = 90)"
 
 
 def _conferir_falas() -> bool:
@@ -246,15 +234,20 @@ def perfil_cozinha_salvar(args: dict, session_id: Optional[str] = None) -> dict:
     aceitos: dict[str, Any] = {}
     recusados: list[dict[str, Any]] = []
     for grupo, itens in pedido.items():
-        for chave, valor in itens.items():
-            motivo = None if not verificar else (sem_fala if falas_dela is None else _sem_apoio(grupo, chave, valor, falas_dela))
+        for chave, valor in list(itens.items()):
+            valor, motivo = _tempo_em_minutos(chave, valor, falas_dela if verificar else falas.da_sessao(session_id))
+            motivo = motivo or (None if not verificar else (sem_fala if falas_dela is None else _sem_apoio(grupo, chave, valor, falas_dela)))
             if motivo:
                 recusados.append({"grupo": grupo, "chave": chave, "valor": valor, "motivo": motivo})
             else:
-                aceitos.setdefault(grupo, {})[chave] = valor
+                aceitos.setdefault(grupo, {})[chave] = cozinha.rotina_canonica(chave, valor) if grupo == "restricoes" else valor
     for obs in observacoes:
         texto = str(obs).strip()
         if not texto:
+            continue
+        if len(texto) > MAX_OBSERVACAO:  # o 8B despeja a mensagem inteira aqui em vez de separar nos campos certos
+            recusados.append({"grupo": "observacoes", "chave": texto[:60], "motivo": f"observação longa demais (máx. {MAX_OBSERVACAO} caracteres): "
+                              "salve cada informação no campo certo (equipamentos, tecnicas, restricoes)"})
             continue
         if verificar and (falas_dela is None or falas.cobertura(texto, falas_dela) < 0.6):
             recusados.append({"grupo": "observacoes", "chave": texto[:60], "motivo": sem_fala if falas_dela is None else "não encontrei isso no que ela disse"})
@@ -266,12 +259,26 @@ def perfil_cozinha_salvar(args: dict, session_id: Optional[str] = None) -> dict:
     resposta: dict[str, Any] = {"success": not recusados or bool(aceitos), "perfil": perfil, "pendencias": pend,
                                 "completo": not pend, "salvo": aceitos}
     if recusados:
+        so_formato = all("longa demais" in str(r.get("motivo")) or "MINUTOS" in str(r.get("motivo")) for r in recusados)
         resposta.update({
             "bloqueado": not aceitos,
             "recusados": recusados,
-            "aviso": ("Os itens em 'recusados' NÃO foram salvos: a Dona Maria não disse isso. Não preencha por ela. "
+            "aviso": ("Os itens em 'recusados' NÃO foram salvos: corrija o que o motivo diz e salve de novo (o que ela falou continua valendo)."
+                      if so_formato else
+                      "Os itens em 'recusados' NÃO foram salvos: a Dona Maria não disse isso. Não preencha por ela. "
                       "Pergunte (um item de cada vez, com as palavras do item) e salve só o que ela responder."),
         })
+    if aceitos:  # o resumo vai pronto: o 8B, sem ele, "confirma" ao usuário técnicas e restrições que ela nunca disse
+        faltam = [t for g, t in (("equipamentos", "equipamentos e utensílios"), ("tecnicas", "técnicas que ela domina"), ("restricoes", "rotina da cozinha"))
+                  if any(p["grupo"] == g for p in pend)]
+        resposta["diga_a_dona_maria"] = ("Salvei na sua cozinha. " + cozinha.texto_do_perfil(perfil, para_ela=True)
+                                        + " Você vê e corrige tudo em Minha cozinha (menu)."
+                                        + (f" Ainda falta saber: {', '.join(faltam)}." if faltam else " A cozinha está completa."))
+    if pend:
+        resposta["perguntas_prontas"] = cozinha.perguntas_da_cozinha(pend)
+        resposta["lembrete"] = ("Antes de perguntar o que falta, releia o que ela acabou de dizer: se ela já falou de técnicas, equipamentos ou rotina, "
+                                "salve agora (cada coisa no seu campo; técnicas em 'tecnicas': nome da técnica → 'sim', 'nao' ou 'aprendendo') "
+                                "e só pergunte o que sobrar.")
     return resposta
 
 
@@ -589,6 +596,28 @@ def _avaliar(res: dict[str, Any], equip: dict[str, list[str]], tec: dict[str, li
     return {"veredito": veredito, "bloqueios": impedimentos + confirmacoes, "proximos_passos": proximos}
 
 
+def _somar_cozinha(perfil: dict[str, Any], nome: str, ingredientes: list[Any], equip: dict[str, list[str]],
+                   tec: dict[str, list[str]]) -> dict[str, Any]:
+    """Soma ao que o modelo leu na receita o que a base de conhecimento exige do prato e dos ingredientes
+    (prompts/base-de-conhecimento/cozinha-e-equipamentos): o modelo esquece de listar o forno da pizza, a ficha não.
+    Muda ``equip`` e ``tec`` no lugar, sem repetir o que o modelo já listou, e devolve a conferência (com as frases prontas)."""
+    nomes = [str((i.get("nome") if isinstance(i, dict) else i) or "") for i in ingredientes]
+    c = cozinha.conferir(nome, nomes, perfil)
+    ja_equip = {_equip_key(n) for lista in equip.values() for n in lista}
+    for chave, destino in (("falta", "faltando"), ("confirmar", "nao_informado")):
+        for f in c[chave]:
+            if not ja_equip & set(f["ids"]):
+                equip[destino].append(f["precisa"])
+                ja_equip |= set(f["ids"])
+    ja_tec = {cozinha.habilidade_id(n) for lista in tec.values() for n in lista} - {None}
+    for chave, destino in (("faltam", "faltando"), ("aprendendo", "parcial"), ("confirmar", "nao_informado")):
+        for hid in c["habilidades"][chave]:
+            if hid not in ja_tec:
+                tec[destino].append(cozinha.POR_ID[hid].rotulo)
+                ja_tec.add(hid)
+    return c
+
+
 def _requisitos(receita: dict[str, Any]) -> dict[str, Any]:
     dados = receita.get("dados") or {}
     return {
@@ -606,17 +635,20 @@ def _avaliar_prato(store: Store, ingredientes: list[Any], receita: dict[str, Any
     perfil = store.perfil()
     equip = _checar_equipamentos(perfil, req["equipamentos_necessarios"])
     tec = _checar_tecnicas(perfil, req["tecnicas_necessarias"])
+    da_cozinha = _somar_cozinha(perfil, str(receita.get("nome") or ""), ingredientes, equip, tec)
     orc = _orcamento_resumo(store, res["compras_total_estimado"])
     aval = _avaliar(res, equip, tec, orc, _pendencias_perfil(perfil))
-    aval.update({"resultado": res, "equipamentos": equip, "tecnicas": tec, "orcamento": orc, "requisitos": req,
+    aval.update({"resultado": res, "equipamentos": equip, "tecnicas": tec, "orcamento": orc, "requisitos": req, "cozinha": da_cozinha,
                  "avisos_operacionais": _restricoes_relevantes(perfil, req["tempo_preparo_min"])})
     return aval
 
 
 def _recusa(motivo: str, aval: dict[str, Any], **extra: Any) -> dict[str, Any]:
     """Resposta padrão de trava: nada foi gravado; o modelo recebe o que falta e o que fazer."""
+    frases = (aval.get("cozinha") or {}).get("mensagens") or []
     return {"success": False, "bloqueado": True, "error": motivo, "veredito": aval.get("veredito"),
-            "bloqueios": aval.get("bloqueios", []), "proximos_passos": aval.get("proximos_passos", []), **extra}
+            "bloqueios": aval.get("bloqueios", []), "proximos_passos": aval.get("proximos_passos", []),
+            **({"diga_a_dona_maria": " ".join(frases)} if frases else {}), **extra}
 
 
 def _reservas_de(res: dict[str, Any], legivel: bool = False) -> list[dict[str, Any]]:
@@ -646,6 +678,7 @@ def receita_conferir_ingredientes(args: dict) -> dict:
     perfil = store.perfil()
     equip = _checar_equipamentos(perfil, list(args.get("equipamentos_necessarios") or []))
     tec = _checar_tecnicas(perfil, list(args.get("tecnicas_necessarias") or []))
+    da_cozinha = _somar_cozinha(perfil, nome, ingredientes, equip, tec)
     avisos = _restricoes_relevantes(perfil, _num(args.get("tempo_preparo_min")))
     orc = _orcamento_resumo(store, res["compras_total_estimado"])
     pend_perfil = _pendencias_perfil(perfil)
@@ -659,6 +692,8 @@ def receita_conferir_ingredientes(args: dict) -> dict:
              "tempo_preparo_min": args.get("tempo_preparo_min")}
     receita_id = store.salvar_receita(nome, args.get("fonte_url"), porcoes, dados, "conferida")
     proximos = list(aval["proximos_passos"])
+    if da_cozinha["mensagens"]:
+        proximos.insert(0, "conte a ela, com as palavras de 'avisos_da_cozinha', o que a cozinha dela não faz ou ainda não confirmou")
     if veredito == "viavel":
         proximos.append(f"se ela gostar da receita, chamar prato_calcular_cmv com receita_id={receita_id}")
     else:
@@ -682,6 +717,7 @@ def receita_conferir_ingredientes(args: dict) -> dict:
         },
         "equipamentos": equip,
         "tecnicas": tec,
+        "avisos_da_cozinha": da_cozinha["mensagens"],
         "avisos_operacionais": avisos,
         "perfil_pendente": pend_perfil,
         "pendencias": res["pendencias"],
@@ -985,6 +1021,19 @@ def _recusa_saldo(exc: OrcamentoEstourado, store: Store) -> dict[str, Any]:
             "proximos_passos": ["diga quanto falta e pergunte se ela prefere tirar um item do carrinho (carrinho_remover) ou trocar por um mais barato"]}
 
 
+def _aviso_da_cozinha(store: Store, prato: Optional[str], ingredientes: list[str], *, lembrar_do_perfil: bool = False) -> dict[str, Any]:
+    """Confere o que vai para o carrinho com a cozinha dela (o que ela tem, o que sabe fazer e as fichas da base) e devolve as frases
+    prontas para a consultora repetir. É rascunho de compra, então só avisa: quem decide é ela. As travas de verdade ficam no caminho da
+    receita ao cardápio (``_avaliar_prato``)."""
+    perfil = store.perfil()
+    c = cozinha.conferir(prato, ingredientes, perfil)
+    pend = _pendencias_perfil(perfil)
+    linhas = [("Atenção: " + m) if c["status"] in ("nao_da", "atencao") else m for m in c["mensagens"]]
+    if pend and lembrar_do_perfil:
+        linhas.append(f"Ainda não sei tudo da sua cozinha ({len(pend)} perguntas sem resposta): conte aqui ou marque em Minha cozinha antes de comprar.")
+    return {"status": c["status"], "mensagens": c["mensagens"], "texto": "\n".join(linhas), "perfil_pendente": [p["pergunta"] for p in pend]}
+
+
 def _e_prato(store: Store, nome: str) -> bool:
     """Nome de prato (um dos salvos ou da base de pratos mais vendidos): não entra no carrinho como item de preço fechado."""
     return store.salvo_por_nome("prato", nome) is not None or analytics.e_prato(nome)
@@ -1012,7 +1061,11 @@ def carrinho_adicionar(args: dict) -> dict:
                                         estimado=bool(args.get("preco_estimado")), origem="consultora", motivo=args.get("motivo"))
     except OrcamentoEstourado as exc:
         return _recusa_saldo(exc, store)
-    return _carrinho_resposta(store, adicionado={k: item[k] for k in ("id", "nome", "quantidade", "unidade", "preco_total", "estimado")})
+    aviso = _aviso_da_cozinha(store, args.get("motivo"), [nome])
+    extra: dict[str, Any] = {}
+    if aviso["texto"]:
+        extra = {"alerta_da_cozinha": aviso, "diga_a_dona_maria": aviso["texto"] + "\n" + _texto_saldo(store.carrinho_resumo())}
+    return _carrinho_resposta(store, adicionado={k: item[k] for k in ("id", "nome", "quantidade", "unidade", "preco_total", "estimado")}, **extra)
 
 
 @_tool
@@ -1038,7 +1091,9 @@ def carrinho_adicionar_prato(args: dict) -> dict:
     if args.get("salvar"):
         extra["salvo_em_meus_pratos"] = store.salvo_salvar("prato", grupo["prato"], ingredientes=ingredientes, origem="consultora")["nome"]
     resumo = store.carrinho_resumo()
-    return _carrinho_resposta(store, prato=grupo, diga_a_dona_maria=_texto_prato(grupo) + "\n" + _texto_saldo(resumo), **extra)
+    aviso = _aviso_da_cozinha(store, grupo["prato"], [i["nome"] for i in grupo["ingredientes"]], lembrar_do_perfil=True)
+    texto = (aviso["texto"] + "\n" if aviso["texto"] else "") + _texto_prato(grupo) + "\n" + _texto_saldo(resumo)
+    return _carrinho_resposta(store, prato=grupo, diga_a_dona_maria=texto, alerta_da_cozinha=aviso, **extra)
 
 
 @_tool
@@ -1121,11 +1176,19 @@ def _contexto_mais_vendidos(r: dict[str, Any], local: str) -> str:
     return f"{nivel['rotulo']}: {nivel['onde']}" if nivel else r["escopo"]
 
 
+def _marca_da_cozinha(m: dict[str, Any]) -> str:
+    c = m.get("cozinha") or {}
+    if c.get("status") == "nao_da":
+        return " [NÃO dá na cozinha dela: " + "; ".join(f["precisa"] for f in c["falta"]) + "]"
+    return " [atenção: ela ainda está aprendendo ou não sabe uma habilidade do prato]" if c.get("status") == "atencao" else ""
+
+
 @_tool
 def analytics_consultar(args: dict) -> dict:
     store = Store()
     negocio = store.negocio()
     r = analytics.consultar(negocio, str(args.get("escopo") or "prioridade"), int(_num(args.get("limite"), 8) or 8), args.get("categoria"))
+    cozinha.anotar_ranking(r["ranking"], store.perfil())
     ranking = []
     for m in r["ranking"]:
         item = {"posicao": m["posicao"], "prato": m["prato"], "categoria": m["categoria"], "preco_medio": m["preco_medio"],
@@ -1135,20 +1198,36 @@ def analytics_consultar(args: dict) -> dict:
             item["onde"] = [f"{o['escopo']} #{o['posicao']}" for o in m["onde"]]
         else:
             item["indice_de_vendas"] = m["indice"]
+        c = m["cozinha"]
+        item["cozinha_dela"] = c["status"]
+        if c["status"] in ("nao_da", "atencao"):
+            item["aviso_da_cozinha"] = c["mensagens"][0]
+        if m.get("preco"):
+            p = m["preco"]
+            item["quanto_cobrar"] = {"custo_tipico_de_exemplo": p["cmv"], "cobrar_no_minimo_sem_prejuizo": p["preco_minimo"],
+                                     **{f"para_sobrar_{round(x['margem'] * 100)}_por_cento": x["preco"] for x in p["cenarios"]},
+                                     "lucro_por_prato_no_preco_do_mercado": p["mercado"]["lucro"]}
         ranking.append(item)
     local = negocio_mod.descrever_local(negocio)
     resposta: dict[str, Any] = {
         "success": True, "escopo": r["escopo"], "local_da_loja": local or "não informado (Meu negócio)",
         "escopos_com_dados": [f"{e['rotulo']}: {e['onde']}" for e in r["escopos_disponiveis"]], "ranking": ranking, "aviso": r["aviso"],
         "como_usar": ("Copie 'diga_a_dona_maria' (ele já avisa que é a base de exemplo) e pergunte qual prato ela prefere. Os primeiros são os da zona "
-                      "e da cidade da loja. Para o prato que ela escolher, detalhe os ingredientes e o valor de cada um (carrinho_adicionar_prato)."),
+                      "e da cidade da loja. Cada prato traz 'cozinha_dela' (ok, confirmar, atencao ou nao_da, conferido com o que ela tem e sabe fazer): "
+                      "não ofereça como opção um prato 'nao_da' sem dizer o motivo. 'quanto_cobrar' usa um custo TÍPICO DE EXEMPLO; para o custo real "
+                      "dela use prato_calcular_cmv e preco_sugerir. Para o prato que ela escolher, detalhe os ingredientes e o valor de cada um "
+                      "(carrinho_adicionar_prato)."),
     }
     if r.get("mensagem"):
         resposta["mensagem"] = r["mensagem"]
     if ranking:
-        lista = "; ".join(f"{m['posicao']}) {m['prato']} (~{costing.brl(m['preco_medio'])})" for m in ranking[:5])
+        lista = "; ".join(
+            f"{m['posicao']}) {m['prato']} (~{costing.brl(m['preco_medio'])}"
+            + (f"; cobrar a partir de {costing.brl(m['preco']['preco_minimo'])}" if m.get("preco") else "") + ")" + _marca_da_cozinha(m)
+            for m in r["ranking"][:5])
         resposta["diga_a_dona_maria"] = (f"Mais vendidos ({_contexto_mais_vendidos(r, local)}; base de exemplo, dados ilustrativos, "
-                                         f"não são vendas reais): {lista}.")
+                                         f"não são vendas reais): {lista}. \"Cobrar a partir de\" é o preço sem prejuízo depois da taxa de 10% "
+                                         "(custo típico de exemplo ÷ 0,90): com o custo real dela o número muda.")
     return resposta
 
 
@@ -1200,17 +1279,16 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "perfil_cozinha_consultar": {
         "name": "perfil_cozinha_consultar",
-        "description": "Mostra o que já se sabe da cozinha da Dona Maria (equipamentos, técnicas, restrições operacionais) e a lista de perguntas ainda pendentes do checklist. Chame antes de aprovar qualquer prato: o que estiver pendente deve ser perguntado com a tool clarify.",
+        "description": "Mostra a cozinha da Dona Maria (equipamentos e utensílios, técnicas, restrições operacionais: o que ela contou na conversa e o que marcou na tela Minha cozinha, que é o mesmo registro), as perguntas ainda pendentes e o texto delas já pronto (perguntas_prontas). Chame antes de aprovar qualquer prato: pergunte o que estiver pendente copiando perguntas_prontas em texto (ou com clarify, se você tiver essa tool).",
         "parameters": {"type": "object", "properties": {}},
     },
     "perfil_cozinha_salvar": {
         "name": "perfil_cozinha_salvar",
-        "description": "Salva SÓ o que a Dona Maria disse sobre a cozinha dela. A tool confere cada item com as falas dela e recusa (campo 'recusados') o que ela não falou, mesmo que pareça óbvio: se ela não falou, não envie o item, pergunte. Nunca complete o perfil por conta própria. 'equipamentos': nome do equipamento → número (bocas do fogão) ou true/false. 'tecnicas': nome da técnica → 'sim', 'nao' ou 'aprendendo'. 'restricoes': espaco_geladeira, tempo_por_cozinhada_min (em minutos), gas, energia e outras. Faz merge com o que já existe.",
+        "description": "Salva SÓ o que a Dona Maria disse sobre a cozinha dela. A tool confere cada item com as falas dela e recusa (campo 'recusados') o que ela não falou, mesmo que pareça óbvio: se ela não falou, não envie o item, pergunte. Nunca complete o perfil por conta própria. 'equipamentos': nome do equipamento → número (bocas do fogão) ou true/false. 'tecnicas': nome da técnica → 'sim', 'nao' ou 'aprendendo'. 'restricoes': espaco_geladeira, tempo_por_cozinhada_min (em minutos), gas, energia e outras. Faz merge com o que já existe. Técnicas que ela contou (\"sei refogar\", \"nunca fiz massa fresca\") vão em 'tecnicas', nunca em texto livre.",
         "parameters": {"type": "object", "properties": {
             "equipamentos": {"type": "object", "description": "só equipamentos que ela citou: nome → número ou true/false", "additionalProperties": True},
             "tecnicas": {"type": "object", "description": "só técnicas que ela citou: nome → 'sim', 'nao' ou 'aprendendo'", "additionalProperties": True},
             "restricoes": {"type": "object", "description": "só restrições que ela contou: espaco_geladeira, tempo_por_cozinhada_min, gas, energia...", "additionalProperties": True},
-            "observacoes": {"type": "string", "description": "Observação livre, com as palavras dela (a tool confere)"},
         }},
     },
     "receita_conferir_ingredientes": {
@@ -1289,7 +1367,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "carrinho_adicionar_prato": {
         "name": "carrinho_adicionar_prato",
-        "description": "Põe um PRATO no carrinho, sempre aberto: todos os ingredientes, cada um com quantidade e valor em R$ (preco_total), mais o total do prato. Nunca ponha um prato como item único com preço fechado. Sem 'ingredientes', usa o prato que ela salvou com esse nome. Ingrediente que ela já tem na despensa: ja_tem=true (mostra o valor e não gasta saldo). Recusa (bloqueado=true) se o que ela vai comprar não couber no saldo. salvar=true também guarda o prato em 'Meus pratos'.",
+        "description": "Põe um PRATO no carrinho, sempre aberto: todos os ingredientes, cada um com quantidade e valor em R$ (preco_total), mais o total do prato. Nunca ponha um prato como item único com preço fechado. Sem 'ingredientes', usa o prato que ela salvou com esse nome. Ingrediente que ela já tem na despensa: ja_tem=true (mostra o valor e não gasta saldo). Recusa (bloqueado=true) se o que ela vai comprar não couber no saldo. Confere o prato com a cozinha dela: se ela não tem o que o prato precisa, o aviso vem em alerta_da_cozinha e no começo de diga_a_dona_maria (copie-o). salvar=true também guarda o prato em 'Meus pratos'.",
         "parameters": {"type": "object", "properties": {
             "prato": {"type": "string", "description": "Nome do prato"},
             "ingredientes": {"type": "array", "description": "Ingredientes do prato, cada um com o valor", "items": {"type": "object", "properties": {
@@ -1335,7 +1413,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "analytics_consultar": {
         "name": "analytics_consultar",
-        "description": "Pratos mais vendidos, com preço médio e ingredientes típicos, da base de conhecimento (dados de EXEMPLO, não são vendas reais). Por padrão vem priorizado pelo lugar da loja (zona, cidade, estado, região, país: o mais local pesa mais). Use para sugerir pratos antes de montar o carrinho e diga que é a base de exemplo.",
+        "description": "Pratos mais vendidos, com preço médio e ingredientes típicos, da base de conhecimento (dados de EXEMPLO, não são vendas reais). Por padrão vem priorizado pelo lugar da loja (zona, cidade, estado, região, país: o mais local pesa mais). Cada prato traz cozinha_dela (ok, confirmar, atencao ou nao_da: se a cozinha dela faz) e quanto_cobrar (preço mínimo sem prejuízo depois da taxa de 10% e por margem, com custo típico de exemplo). Use para sugerir pratos antes de montar o carrinho, sem oferecer um prato nao_da, e diga que é a base de exemplo.",
         "parameters": {"type": "object", "properties": {
             "escopo": {"type": "string", "enum": ["prioridade", "zona", "cidade", "estado", "regiao", "pais"], "description": "prioridade (padrão) junta todos os níveis; os outros mostram só aquele nível"},
             "limite": {"type": "integer", "description": "Quantos pratos (padrão 8)"},

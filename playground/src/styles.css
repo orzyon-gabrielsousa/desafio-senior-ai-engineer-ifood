@@ -217,12 +217,12 @@ button:disabled { cursor: default; }
   color: var(--muted);
 }
 
-.conv-list, .roteiro, .stages { list-style: none; margin: 0; padding: 0; }
+.conv-list, .stages { list-style: none; margin: 0; padding: 0; }
 .conv-list { display: flex; flex-direction: column; gap: 2px; }
 .conv-list li { display: flex; align-items: center; gap: 2px; }
 .conv-empty { padding: 6px 8px; color: var(--ink-soft); font-size: 0.92rem; }
 
-.conv, .roteiro-item, .icon-btn {
+.conv, .icon-btn {
   border: 0;
   background: transparent;
 }
@@ -239,7 +239,7 @@ button:disabled { cursor: default; }
   font-weight: 600;
 }
 .conv svg { width: 18px; height: 18px; flex: none; color: var(--muted); }
-.conv:hover, .roteiro-item:hover { background: var(--bg); }
+.conv:hover { background: var(--bg); }
 .conv.active { background: var(--red-soft); box-shadow: inset 3px 0 0 var(--red); }
 .conv.active svg { color: var(--red); }
 .conv-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -256,41 +256,12 @@ button:disabled { cursor: default; }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn:hover { background: var(--chip); color: var(--red-ink); }
 
-.roteiro { display: flex; flex-direction: column; gap: 2px; }
-.roteiro-item {
-  display: flex;
-  gap: 10px;
-  width: 100%;
-  padding: 8px;
-  border-radius: 10px;
-  text-align: left;
-}
-.step {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  margin-top: 1px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--red-soft);
-  color: var(--red-ink);
-  font-size: 0.78rem;
-  font-weight: 800;
-}
-.roteiro-item strong, .stage strong { display: block; font-weight: 800; }
-.roteiro-item strong { font-size: 0.95rem; }
-.roteiro-item small, .stage small {
+.stage strong { display: block; font-weight: 800; }
+.stage small {
   display: block;
   color: var(--ink-soft);
   font-size: 0.86rem;
   line-height: 1.35;
-}
-.roteiro-item small {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 .side-foot { margin-top: auto; padding-top: 16px; }
@@ -933,6 +904,92 @@ code {
 .rank-onde span { padding: 1px 8px; border-radius: 999px; background: var(--chip); color: var(--ink-soft); font-size: 0.74rem; font-weight: 700; }
 .rank-item .mini-btn { margin-top: 10px; }
 .sheet-note.fonte { margin-top: 14px; overflow-wrap: anywhere; }
+
+/* ---------- Minha cozinha: equipamentos, habilidades e rotina ---------- */
+
+.toggle { display: inline-flex; align-items: center; gap: 6px; }
+.toggle svg { width: 14px; height: 14px; flex: none; }
+.cozinha-progresso { margin: 4px 0 2px; }
+.cozinha-progresso small { display: block; margin-top: 6px; color: var(--ink-soft); font-size: 0.84rem; }
+.field.bocas { max-width: 260px; margin-top: 12px; }
+
+.habilidades { list-style: none; margin: 0; padding: 0; }
+.habilidade { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.habilidade:last-child { border-bottom: 0; }
+.habilidade-nome { flex: 1 1 200px; min-width: 0; }
+.habilidade-nome strong { display: block; font-size: 0.95rem; font-weight: 800; }
+.habilidade-nome small { display: block; color: var(--ink-soft); font-size: 0.82rem; }
+.niveis { display: inline-flex; gap: 4px; padding: 3px; border-radius: 10px; background: var(--chip); }
+.nivel { padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-soft); font-size: 0.82rem; font-weight: 800; white-space: nowrap; }
+.nivel:hover { color: var(--ink); }
+.nivel.on { background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14); }
+.nivel.on.sim { color: var(--green-ink); }
+.nivel.on.aprendendo { color: #8a5a00; }
+.nivel.on.nao { color: var(--red-ink); }
+
+.outros { list-style: none; margin: 0; padding: 0; }
+.outros li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.outros strong { display: block; font-weight: 800; }
+.outros small { display: block; color: var(--ink-soft); font-size: 0.84rem; overflow-wrap: anywhere; }
+
+/* A barra de salvar fica à vista enquanto a lista rola; as margens negativas a levam de ponta a ponta do painel. */
+.cozinha-rodape { position: sticky; bottom: 0; display: flex; flex-direction: column; gap: 8px; margin: 18px -20px -28px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+.cozinha-rodape .sheet-note { margin: 0; }
+
+/* ---------- avisos: o que a cozinha dela não faz ---------- */
+
+.aviso-cozinha { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 0.9rem; }
+.aviso-cozinha > svg { flex: none; width: 20px; height: 20px; margin-top: 1px; }
+.aviso-cozinha p { margin: 0 0 6px; }
+.aviso-cozinha .link-btn { margin: 0; padding: 0; }
+.aviso-cozinha.nao_da { border-top-color: var(--red-line); background: var(--red-soft); color: var(--ink); }
+.aviso-cozinha.nao_da > svg { color: var(--red); }
+.aviso-cozinha.atencao { border-top-color: #f3dc9a; background: #fff7e0; color: #6b4a00; }
+.aviso-cozinha.atencao > svg { color: #b87b00; }
+.aviso-cozinha.confirmar { background: var(--bg); color: var(--ink-soft); }
+.aviso-cozinha.confirmar > svg { color: var(--muted); }
+.cart-item .aviso-cozinha { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 10px; }
+.cart-item .aviso-cozinha.nao_da { border-color: var(--red-line); }
+.cart-item .aviso-cozinha.atencao { border-color: #f3dc9a; }
+
+.selo-cozinha { padding: 1px 9px; border-radius: 999px; font-size: 0.74rem; font-weight: 800; white-space: nowrap; }
+.selo-cozinha.ok { background: #e6f5ec; color: var(--green-ink); }
+.selo-cozinha.nao_da { border: 1px solid var(--red-line); background: var(--red-soft); color: var(--red-ink); }
+.selo-cozinha.atencao { background: #fff1c9; color: #7a5200; }
+.selo-cozinha.confirmar { background: var(--chip); color: var(--ink-soft); }
+.rank-aviso { margin: 6px 0 0; padding: 6px 10px; border-radius: 8px; font-size: 0.84rem; }
+.rank-aviso.nao_da { border-left: 3px solid var(--red); background: var(--red-soft); color: var(--ink); }
+.rank-aviso.atencao { border-left: 3px solid var(--amber); background: #fff7e0; color: #6b4a00; }
+
+/* ---------- Analytics: quanto cobrar para lucrar depois da taxa ---------- */
+
+.cobrar-card { margin-top: 12px; padding: 14px 16px; border: 1px solid #cfe9da; border-radius: 14px; background: #f3fbf6; }
+.cobrar-card h3 { margin: 0 0 6px; font-size: 1.02rem; font-weight: 800; }
+.cobrar-regra { margin: 0 0 10px; font-size: 0.95rem; }
+.cobrar-contas { display: grid; gap: 6px; margin: 0 0 10px; }
+.cobrar-contas div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; padding: 8px 10px; border: 1px solid #dcefe3; border-radius: 10px; background: var(--surface); }
+.cobrar-contas dt { color: var(--ink-soft); font-size: 0.88rem; font-weight: 700; }
+.cobrar-contas dd { margin: 0; font-weight: 800; font-variant-numeric: tabular-nums; }
+.cobrar-card .toggle-chips { margin: 0 0 10px; }
+.field.calc { margin-top: 4px; }
+.cobrar-resultado { display: grid; gap: 4px; margin: 10px 0 0; padding: 0; list-style: none; }
+.cobrar-resultado li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border: 1px solid #dcefe3; border-radius: 10px; background: var(--surface); font-size: 0.9rem; }
+.cobrar-resultado li b { color: var(--green-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cobrar-resultado li.minimo { border-color: var(--line-strong); background: var(--bg); font-weight: 700; }
+.cobrar-resultado li.alvo { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }
+.cobrar-card .sheet-note { margin: 8px 0 0; }
+
+.cobrar { margin: 8px 0 4px; padding: 10px 12px; border: 1px solid #cfe9da; border-left: 4px solid var(--green); border-radius: 12px; background: #f3fbf6; }
+.cobrar-titulo { margin: 0 0 2px; color: var(--green-ink); font-size: 0.72rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.cobrar-preco { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0; }
+.cobrar-preco span { color: var(--ink-soft); font-size: 0.9rem; font-weight: 700; }
+.cobrar-preco b { color: var(--green-ink); font-size: 1.35rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.cobrar-preco small { color: var(--ink-soft); font-size: 0.82rem; }
+.cobrar-linha, .cobrar-mercado { margin: 3px 0 0; font-size: 0.86rem; }
+.cobrar-linha small { color: var(--ink-soft); }
+.cobrar-mercado b { color: var(--green-ink); }
+.cobrar-mercado.ruim b { color: var(--red-ink); }
+.cobrar-aviso { display: block; margin-top: 4px; color: var(--muted); font-size: 0.76rem; }
 
 /* ---------- telas menores ---------- */
 

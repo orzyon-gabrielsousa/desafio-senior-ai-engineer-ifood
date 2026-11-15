@@ -7,6 +7,9 @@ Registra no Hermes Agent, sem tocar no core:
 * 1 provider de ``web_extract`` (``receitas-local``): extração de receitas direto da
   página, com schema.org/Recipe, sem API externa.
 
+A cozinha da Dona Maria (``cozinha.py``) é um perfil só, no SQLite: a consultora pergunta na primeira conversa e ela também
+marca na tela Minha cozinha; o painel do turno, as travas de aceite e os avisos do carrinho leem o mesmo registro.
+
 Tudo em biblioteca padrão (sqlite3, zipfile, urllib, html.parser): a imagem
 oficial ``nousresearch/hermes-agent`` roda este plugin sem rebuild.
 """
@@ -19,7 +22,7 @@ from . import falas, painel, tools
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 def register(ctx) -> None:

@@ -3,6 +3,7 @@ import { AnalyticsSheet } from "./analytics";
 import { BusinessSheet } from "./business";
 import { CartSheet } from "./cart";
 import { AppBar, ChatPane, Rail, Sidebar } from "./components";
+import { KitchenSheet } from "./cozinha";
 import {
   ApiError,
   addItem,
@@ -12,6 +13,7 @@ import {
   removeItem,
   removePrato,
   removeSalvo,
+  saveCozinha,
   saveNegocio,
   saveSalvo,
   salvoToCart,
@@ -21,7 +23,7 @@ import { explainFailure, hermesHealth, streamTurn, type TurnMessage } from "./li
 import { PEDIR_SUGESTOES, montarPrato } from "./lib/prompts";
 import { loadConversations, saveConversations } from "./lib/storage";
 import { settleTools } from "./lib/tools";
-import type { CarrinhoAcoes, ChatMessage, Conversation, Estado, Negocio, Online } from "./types";
+import type { CarrinhoAcoes, ChatMessage, Conversation, Estado, Negocio, NovaCozinha, Online } from "./types";
 
 function uid(): string {
   return crypto.randomUUID();
@@ -56,7 +58,7 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [focusTick, setFocusTick] = useState(0);
   const [estado, setEstado] = useState<Estado | null>(null);
-  const [painel, setPainel] = useState<"carrinho" | "negocio" | "analytics" | null>(null);
+  const [painel, setPainel] = useState<"carrinho" | "cozinha" | "negocio" | "analytics" | null>(null);
   const busy = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const conversationsRef = useRef(conversations);
@@ -310,8 +312,8 @@ export function App() {
           setConversations((current) => current.filter((conversation) => conversation.id !== id));
           if (activeId === id) setActiveId(null);
         }}
-        onFill={fill}
         onCart={() => setPainel("carrinho")}
+        onCozinha={() => setPainel("cozinha")}
         onNegocio={() => setPainel("negocio")}
         onAnalytics={() => setPainel("analytics")}
       />
@@ -334,6 +336,7 @@ export function App() {
         <CartSheet
           estado={estado}
           acoes={acoes}
+          onCozinha={() => setPainel("cozinha")}
           onClose={() => setPainel(null)}
           onAsk={() => {
             setPainel(null);
@@ -341,12 +344,17 @@ export function App() {
           }}
         />
       ) : null}
+      {painel === "cozinha" ? (
+        <KitchenSheet estado={estado} onClose={() => setPainel(null)} onSave={(cozinha: NovaCozinha) => aplicar(() => saveCozinha(cozinha))} />
+      ) : null}
       {painel === "negocio" ? (
         <BusinessSheet estado={estado} onClose={() => setPainel(null)} onSave={(negocio: Negocio) => aplicar(() => saveNegocio(negocio))} />
       ) : null}
       {painel === "analytics" ? (
         <AnalyticsSheet
+          estado={estado}
           onClose={() => setPainel(null)}
+          onCozinha={() => setPainel("cozinha")}
           onNegocio={() => setPainel("negocio")}
           onAsk={(prato) => {
             setPainel(null);

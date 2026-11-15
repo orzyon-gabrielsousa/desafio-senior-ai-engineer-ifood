@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Avatar, IfoodLogo, Mark } from "./brand";
-import { CartIcon, ChartIcon, ChatIcon, CheckIcon, CloseIcon, MenuIcon, PlusIcon, SendIcon, StopIcon, StoreIcon } from "./icons";
+import { CartIcon, ChartIcon, ChatIcon, CheckIcon, CloseIcon, KitchenIcon, MenuIcon, PlusIcon, SendIcon, StopIcon, StoreIcon } from "./icons";
 import { brl } from "./lib/format";
 import { contarItens, localCurto } from "./lib/loja";
 import { Markdown } from "./lib/markdown";
-import { ROTEIRO, STARTERS, WELCOME } from "./lib/prompts";
+import { STARTERS, WELCOME } from "./lib/prompts";
 import { STAGES, stageStatus } from "./lib/tools";
 import type { ChatMessage, Conversation, Estado, Online, ToolTrace } from "./types";
 
@@ -87,18 +87,19 @@ type SidebarProps = {
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onFill: (text: string) => void;
   onCart: () => void;
+  onCozinha: () => void;
   onNegocio: () => void;
   onAnalytics: () => void;
 };
 
-export function Sidebar({ open, conversations, activeId, estado, onClose, onNew, onSelect, onDelete, onFill, onCart, onNegocio, onAnalytics }: SidebarProps) {
+export function Sidebar({ open, conversations, activeId, estado, onClose, onNew, onSelect, onDelete, onCart, onCozinha, onNegocio, onAnalytics }: SidebarProps) {
   const itens = estado ? contarItens(estado.carrinho) : 0;
+  const resumoCozinha = estado?.cozinha.resumo;
   const tipo = estado?.negocio ? estado.opcoes.tipos.find((opcao) => opcao.id === estado.negocio?.tipo)?.label : undefined;
   const local = localCurto(estado);
   return (
-    <aside className={open ? "sidebar open" : "sidebar"} aria-label="Conversas e roteiro da demo">
+    <aside className={open ? "sidebar open" : "sidebar"} aria-label="Menu e conversas">
       <button className="new-chat" type="button" onClick={onNew}>
         <PlusIcon />
         Nova conversa
@@ -116,6 +117,26 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
           <span>
             <strong>Carrinho</strong>
             <small>{estado ? `${itens} ${itens === 1 ? "item" : "itens"} · saldo ${brl(estado.orcamento.saldo)}` : "indisponível"}</small>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="menu-item"
+          onClick={() => {
+            onCozinha();
+            onClose();
+          }}
+        >
+          <KitchenIcon />
+          <span>
+            <strong>Minha cozinha</strong>
+            <small>
+              {!resumoCozinha
+                ? "indisponível"
+                : resumoCozinha.respondidos === 0
+                  ? "Marque o que você tem e sabe fazer"
+                  : `${resumoCozinha.respondidos} de ${resumoCozinha.total} itens respondidos`}
+            </small>
           </span>
         </button>
         <button
@@ -174,20 +195,6 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
           </li>
         ))}
       </ul>
-      <p className="nav-label">Roteiro da demo</p>
-      <ol className="roteiro">
-        {ROTEIRO.map((step) => (
-          <li key={step.kicker}>
-            <button type="button" className="roteiro-item" onClick={() => onFill(step.text)}>
-              <span className="step">{step.kicker}</span>
-              <span>
-                <strong>{step.title}</strong>
-                <small>{step.text}</small>
-              </span>
-            </button>
-          </li>
-        ))}
-      </ol>
       <div className="side-foot">
         <p className="legal">
           <strong>Protótipo de um desafio técnico do iFood.</strong> A logo, o nome e as cores do iFood aparecem aqui só para
