@@ -9,6 +9,7 @@ Serviço `inference-llamacpp` do `docker-compose.yml` (perfil `llamacpp`, padrã
 | Contexto | 65 536 tokens (o Hermes recusa modelos abaixo de 64k) |
 | KV cache | q8_0 (K e V), flash attention ligada |
 | Modo | sem "thinking" (`--reasoning-budget 0`); troque para `-1` no `.env` se quiser raciocínio |
+| Teto de resposta | 4 096 tokens por geração (`LLAMA_N_PREDICT`, `-1` desliga): impede geração sem fim, que já derrubou o servidor com `CUDA error: the launch timed out` na GPU dividida com o desktop. Vale para quem não manda `max_tokens` (o Hermes não manda); um pedido com `max_tokens` maior ultrapassa o teto |
 | Tool calling | nativo: `--jinja` usa o template do Qwen3 (formato Hermes `<tool_call>` → `tool_calls` OpenAI) |
 | Amostragem | temp 0,7 · top-p 0,8 · top-k 20 · min-p 0 (recomendação da Qwen para modo não-pensante) |
 

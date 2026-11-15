@@ -3,7 +3,7 @@ import unittest
 
 from sabor_da_maria import costing, tools
 
-from ._base import StoreTestCase
+from ._base import FALA_COZINHA, SESSAO, StoreTestCase, diz
 
 
 class CostingTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class CostingTests(unittest.TestCase):
 
 
 def call(name, **args):
-    return json.loads(tools.HANDLERS[name](args))
+    return json.loads(tools.HANDLERS[name](args, session_id=SESSAO))
 
 
 class ToolsFlowTests(StoreTestCase):
@@ -49,6 +49,7 @@ class ToolsFlowTests(StoreTestCase):
 
         perfil = call("perfil_cozinha_consultar")
         self.assertEqual(len(perfil["pendencias"]), 10)
+        diz(FALA_COZINHA)
         salvo = call("perfil_cozinha_salvar", equipamentos={"fogão": 4, "forno": "sim", "panela de pressão": True, "air fryer": "não", "liquidificador": True},
                      restricoes={"espaco_geladeira": "médio", "tempo_por_cozinhada_min": 120, "gas": "botijão ok", "energia": "estável"},
                      tecnicas={"refogado": "sim", "massa fresca": "nunca fiz", "molho branco": "aprendendo"})
@@ -96,6 +97,7 @@ class ToolsFlowTests(StoreTestCase):
         self.assertEqual(call("cardapio_consultar")["pratos_em_analise"], [])
 
         # Dona Maria responde o que faltava; o CMV reavalia sozinho, sem conferir a receita de novo.
+        diz(FALA_COZINHA, "Também tenho batedeira. Agora sei fazer massa fresca e o ponto da carne.")
         call("perfil_cozinha_salvar", equipamentos={"batedeira": True}, tecnicas={"massa fresca": "sim", "ponto de carne": "sim"})
         cmv = call("prato_calcular_cmv", nome="Frango com batatas", porcoes=4, receita_id=receita["receita_id"])
         self.assertTrue(cmv["success"], cmv)
@@ -185,6 +187,7 @@ class GateTests(StoreTestCase):
     """As travas ficam no backend: o modelo não consegue chegar ao CMV, ao preço nem ao cardápio com pendência."""
 
     def _perfil_completo(self):
+        diz(FALA_COZINHA)
         call("perfil_cozinha_salvar",
              equipamentos={"fogão": 4, "forno": True, "panela de pressão": True, "air fryer": False, "liquidificador": True},
              restricoes={"espaco_geladeira": "médio", "tempo_por_cozinhada_min": 120, "gas": "botijão ok", "energia": "estável"},

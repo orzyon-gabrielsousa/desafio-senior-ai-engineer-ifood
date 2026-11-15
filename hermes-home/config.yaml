@@ -79,8 +79,9 @@ memory:
 
 # ---------------------------------------------------------------- interfaces opcionais
 # API server OpenAI-compatible do gateway (porta 8642) é ligado por variáveis de
-# ambiente no docker-compose (API_SERVER_ENABLED/KEY/CORS). O webapp (chat no
-# navegador, porta 9120) exige um provedor de login; ligue aqui e defina
+# ambiente no docker-compose (API_SERVER_ENABLED/KEY/CORS). O playground React
+# (porta 3000) consome esse endpoint por um proxy que guarda a chave.
+# O webapp do Hermes (porta 9120) exige um provedor de login; ligue aqui e defina
 # HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD no .env se quiser usar.
 webapp:
   enabled: false
@@ -88,3 +89,8 @@ webapp:
   port: 9120
   public_url: "http://localhost:9120"
 _config_version: 53
+telemetry:
+  shared_metrics:
+    enabled: false
+    send: false
+    offer_version: 2

@@ -1,6 +1,6 @@
 name: sabor_da_maria
-version: 1.1.0
-description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Travas no backend: CMV, preço e registro recusam prato com pendência; o aceite reserva estoque e compromete orçamento numa transação só. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
+version: 1.3.0
+description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Carrinho de compras com saldo do orçamento (pratos abertos, com ingredientes e valores), pratos e ingredientes salvos, perfil do negócio com a localização da loja e Analytics de pratos mais vendidos por zona, cidade, estado, região e país, que a consultora usa para sugerir pratos e ingredientes. Travas no backend: CMV, preço, registro e carrinho por receita recusam prato com pendência; o aceite reserva estoque e compromete orçamento numa transação só. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
 author: "Gabriel Sousa"
 license: MIT
 tags: [cozinha, precificacao, cmv, delivery, ifood]
@@ -16,6 +16,18 @@ provides_tools:
   - cardapio_registrar
   - cardapio_remover
   - cardapio_consultar
+  - carrinho_consultar
+  - carrinho_adicionar
+  - carrinho_adicionar_prato
+  - carrinho_remover
+  - carrinho_montar_da_receita
+  - salvos_salvar
+  - analytics_consultar
+provides_hooks:
+  # pre_llm_call: guarda o que a Dona Maria disse (falas.py, trava de evidência do perfil) e leva o carrinho,
+  # o saldo e o perfil do negócio ao turno (painel.py). post_tool_call: respostas do clarify (falas.py).
+  - pre_llm_call
+  - post_tool_call
 provides_web_providers:
   - receitas-local
 optional_env:

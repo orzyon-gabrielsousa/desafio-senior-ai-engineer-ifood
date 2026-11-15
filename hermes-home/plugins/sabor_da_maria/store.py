@@ -9,11 +9,17 @@ do Hermes e sobrevive entre sessões. Tabelas:
 * ``pratos``        — CMV calculado e, quando aceito, preço escolhido
 * ``compras``       — compras complementares planejadas/confirmadas/canceladas (orçamento)
 * ``reservas``      — estoque da despensa reservado por prato aceito (disponível = estoque − reservas)
-* ``config``        — orçamento inicial e origem da planilha
+* ``carrinho``      — itens que ela separou para comprar (a consultora mexe a pedido dela); prato = ingredientes com valor;
+                      o que já está na despensa aparece com valor mas não gasta orçamento
+* ``salvos``        — pratos (com ingredientes e valores) e ingredientes avulsos que ela guardou para usar de novo
+* ``config``        — orçamento inicial, origem da planilha e perfil do negócio
 
 Reservas e compras confirmadas só existem para pratos ``aceito``; ``cardapio_remover`` as
 libera. Um ``Store(ignorar_prato_id=X)`` desconta do cálculo as reservas e compras do próprio
 prato X, para que repetir o registro de X (retry, troca de preço) não conte duas vezes.
+
+O carrinho é rascunho de compra: ``saldo = restante − carrinho``. Itens ligados a uma receita saem do
+carrinho quando o prato dela é aceito (viram compras comprometidas), para o mesmo gasto não contar duas vezes.
 """
 
 from __future__ import annotations
@@ -27,11 +33,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from . import negocio as negocio_mod
 from .matching import best_matches
 from .units import format_base, norm_text, parse_pantry_unit
 from .xlsx_reader import read_table
 
 _LOCK = threading.RLock()
+
+
+class OrcamentoEstourado(ValueError):
+    """O item (ou a nova quantidade) não cabe no saldo do orçamento."""
+
+    def __init__(self, falta: float, saldo: float):
+        self.falta = round(falta, 2)
+        self.saldo = round(saldo, 2)
+        super().__init__(f"não cabe no saldo: faltam R$ {self.falta:.2f} (saldo atual R$ {self.saldo:.2f})".replace(".", ","))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ingredientes (
@@ -96,6 +112,35 @@ CREATE TABLE IF NOT EXISTS reservas (
 );
 CREATE INDEX IF NOT EXISTS idx_reservas_prato ON reservas(prato_id);
 CREATE INDEX IF NOT EXISTS idx_reservas_ingrediente ON reservas(ingrediente_id);
+CREATE TABLE IF NOT EXISTS carrinho (
+    id INTEGER PRIMARY KEY,
+    nome TEXT NOT NULL,
+    quantidade REAL NOT NULL DEFAULT 1,
+    unidade TEXT,
+    preco_total REAL NOT NULL,
+    estimado INTEGER NOT NULL DEFAULT 0,
+    origem TEXT NOT NULL DEFAULT 'manual',
+    receita_id INTEGER,
+    motivo TEXT,
+    prato TEXT,
+    ja_tem INTEGER NOT NULL DEFAULT 0,
+    criado_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_carrinho_receita ON carrinho(receita_id);
+CREATE TABLE IF NOT EXISTS salvos (
+    id INTEGER PRIMARY KEY,
+    tipo TEXT NOT NULL,
+    nome TEXT NOT NULL,
+    nome_norm TEXT NOT NULL,
+    quantidade REAL,
+    unidade TEXT,
+    preco_total REAL,
+    ingredientes TEXT,
+    origem TEXT NOT NULL DEFAULT 'tela',
+    criado_em TEXT NOT NULL,
+    atualizado_em TEXT NOT NULL,
+    UNIQUE (tipo, nome_norm)
+);
 CREATE TABLE IF NOT EXISTS config (
     chave TEXT PRIMARY KEY,
     valor TEXT NOT NULL
@@ -131,6 +176,77 @@ def _col(row: dict[str, Any], prefix: str) -> Any:
     raise KeyError(f"Coluna começando com {prefix!r} não encontrada em {list(row)}")
 
 
+def _item_carrinho(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["estimado"] = bool(d["estimado"])
+    d["ja_tem"] = bool(d.get("ja_tem"))
+    d["preco_total"] = round(float(d["preco_total"]), 2)
+    return d
+
+
+def _nome_limpo(valor: Any, rotulo: str = "item") -> str:
+    nome = " ".join(str(valor or "").split())
+    if not nome:
+        raise ValueError(f"informe o nome do {rotulo}")
+    if len(nome) > 80:
+        raise ValueError(f"o nome do {rotulo} passa de 80 caracteres")
+    return nome
+
+
+def _unidade_limpa(valor: Any) -> Optional[str]:
+    return " ".join(str(valor).split())[:20] if valor else None
+
+
+def _numero(valor: Any, rotulo: str) -> float:
+    """Número vindo da tela ou de uma tool: aceita 12, 12.5 e "12,50"; recusa texto, vazio e booleano."""
+    if isinstance(valor, bool) or valor is None or valor == "":
+        raise ValueError(f"{rotulo} inválido")
+    try:
+        numero = float(str(valor).strip().replace(",", ".")) if isinstance(valor, str) else float(valor)
+    except (TypeError, ValueError):
+        raise ValueError(f"{rotulo} inválido") from None
+    if numero != numero or numero in (float("inf"), float("-inf")):
+        raise ValueError(f"{rotulo} inválido")
+    return numero
+
+
+MAX_INGREDIENTES = 40
+
+
+def _linhas_do_prato(ingredientes: Any) -> list[dict[str, Any]]:
+    """Valida os ingredientes de um prato. Cada um precisa de nome e de valor (R$): um prato sem o valor de cada
+    ingrediente não entra, nem no carrinho nem nos salvos. ``ja_tem`` (já está na despensa) pode custar 0."""
+    if not isinstance(ingredientes, list) or not ingredientes:
+        raise ValueError("informe os ingredientes do prato, cada um com quantidade e valor (preco_total em R$)")
+    if len(ingredientes) > MAX_INGREDIENTES:
+        raise ValueError(f"no máximo {MAX_INGREDIENTES} ingredientes por prato")
+    linhas = []
+    for i in ingredientes:
+        if not isinstance(i, dict):
+            raise ValueError("cada ingrediente precisa ser um objeto {nome, quantidade, unidade, preco_total}")
+        nome = _nome_limpo(i.get("nome"), "ingrediente")
+        ja_tem = bool(i.get("ja_tem"))
+        if i.get("preco_total") in (None, ""):
+            raise ValueError(f"informe o valor de {nome} (preco_total em R$)")
+        preco = round(_numero(i.get("preco_total"), f"valor de {nome}"), 2)
+        if preco < 0 or (preco == 0 and not ja_tem):
+            raise ValueError(f"informe o valor de {nome} (maior que zero)")
+        qtd = 1.0 if i.get("quantidade") in (None, "") else _numero(i.get("quantidade"), f"quantidade de {nome}")
+        if qtd <= 0:
+            raise ValueError(f"a quantidade de {nome} precisa ser maior que zero")
+        linhas.append({"nome": nome, "quantidade": qtd, "unidade": _unidade_limpa(i.get("unidade")), "preco_total": preco, "ja_tem": ja_tem})
+    return linhas
+
+
+def _salvo(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d.pop("nome_norm", None)
+    d["ingredientes"] = json.loads(d["ingredientes"]) if d.get("ingredientes") else []
+    if d.get("preco_total") is not None:
+        d["preco_total"] = round(float(d["preco_total"]), 2)
+    return d
+
+
 def _ingredient_dict(row: sqlite3.Row, reservado: float = 0.0) -> dict[str, Any]:
     d = dict(row)
     base = d["unidade_base"]
@@ -159,6 +275,16 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrar(conn)
+
+    @staticmethod
+    def _migrar(conn: sqlite3.Connection) -> None:
+        """Bancos criados por versões anteriores ganham as colunas novas do carrinho (prato e ja_tem)."""
+        colunas = {r[1] for r in conn.execute("PRAGMA table_info(carrinho)")}
+        if "prato" not in colunas:
+            conn.execute("ALTER TABLE carrinho ADD COLUMN prato TEXT")
+        if "ja_tem" not in colunas:
+            conn.execute("ALTER TABLE carrinho ADD COLUMN ja_tem INTEGER NOT NULL DEFAULT 0")
 
     # ------------------------------------------------------------------ infra
     @contextmanager
@@ -477,6 +603,7 @@ class Store:
                 """SELECT c.*, p.nome AS prato FROM compras c LEFT JOIN pratos p ON p.id = c.prato_id
                    WHERE (? IS NULL OR c.prato_id IS NOT ?) ORDER BY c.id""",
                 (self.ignorar_prato_id, self.ignorar_prato_id)).fetchall()
+            carrinho = self._carrinho_total(conn)
         confirmadas = [dict(r) for r in rows if r["status"] == "confirmada"]
         planejadas = [dict(r) for r in rows if r["status"] == "planejada"]
         comprometido = round(sum(r["preco_estimado"] for r in confirmadas), 2)
@@ -484,6 +611,278 @@ class Store:
             "inicial": inicial,
             "comprometido": comprometido,
             "restante": round(inicial - comprometido, 2),
+            "carrinho": carrinho,
+            "saldo": round(inicial - comprometido - carrinho, 2),
             "compras_confirmadas": confirmadas,
             "compras_planejadas": planejadas,
         }
+
+    # ------------------------------------------------------------------ carrinho
+    def _carrinho_total(self, conn: sqlite3.Connection) -> float:
+        # Só o que ela vai comprar gasta saldo: o ingrediente que já tem na despensa aparece com valor, mas não conta.
+        return round(float(conn.execute("SELECT COALESCE(SUM(preco_total), 0) FROM carrinho WHERE ja_tem = 0").fetchone()[0]), 2)
+
+    def carrinho_itens(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM carrinho ORDER BY id").fetchall()
+        return [_item_carrinho(r) for r in rows]
+
+    def carrinho_resumo(self) -> dict[str, Any]:
+        """Quanto ela tem (orçamento), quanto já escolheu (carrinho) e o saldo que sobra."""
+        orc = self.orcamento()
+        return {"inicial": orc["inicial"], "comprometido": orc["comprometido"], "carrinho": orc["carrinho"],
+                "saldo": orc["saldo"], "estourou": orc["saldo"] < -0.005}
+
+    def carrinho_pratos(self) -> list[dict[str, Any]]:
+        """O carrinho agrupado por prato: cada um com os ingredientes e o valor de cada um. Avulso fica de fora."""
+        grupos: dict[str, dict[str, Any]] = {}
+        for i in self.carrinho_itens():
+            if not i.get("prato"):
+                continue
+            g = grupos.setdefault(norm_text(i["prato"]), {"prato": i["prato"], "valor_do_prato": 0.0, "a_comprar": 0.0, "ingredientes": []})
+            g["valor_do_prato"] = round(g["valor_do_prato"] + i["preco_total"], 2)
+            if not i["ja_tem"]:
+                g["a_comprar"] = round(g["a_comprar"] + i["preco_total"], 2)
+            g["ingredientes"].append({k: i[k] for k in ("id", "nome", "quantidade", "unidade", "preco_total", "ja_tem", "estimado")})
+        return list(grupos.values())
+
+    def _gravar_linha(self, conn: sqlite3.Connection, nome: str, preco: float, qtd: float, un: Optional[str], *, estimado: bool,
+                      origem: str, receita_id: Optional[int], motivo: Optional[str], prato: Optional[str], ja_tem: bool) -> int:
+        """Põe a linha no carrinho. O mesmo ingrediente (nome + unidade) no mesmo prato soma quantidade e valor."""
+        linhas = conn.execute("SELECT * FROM carrinho WHERE receita_id IS ? ORDER BY id", (receita_id,)).fetchall()
+        if prato:  # mantém a grafia do prato que já está no carrinho
+            prato = next((r["prato"] for r in linhas if r["prato"] and norm_text(r["prato"]) == norm_text(prato)), prato)
+        igual = next((r for r in linhas
+                      if norm_text(r["nome"]) == norm_text(nome) and (r["unidade"] or "") == (un or "")
+                      and norm_text(r["prato"] or "") == norm_text(prato or "") and bool(r["ja_tem"]) == bool(ja_tem)), None)
+        if igual is not None:
+            conn.execute("UPDATE carrinho SET quantidade = ?, preco_total = ?, estimado = ? WHERE id = ?",
+                         (igual["quantidade"] + qtd, round(igual["preco_total"] + preco, 2), int(bool(igual["estimado"]) or estimado), igual["id"]))
+            return int(igual["id"])
+        cur = conn.execute(
+            "INSERT INTO carrinho(nome, quantidade, unidade, preco_total, estimado, origem, receita_id, motivo, prato, ja_tem, criado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (nome, qtd, un, preco, int(bool(estimado)), origem, receita_id, (motivo or "").strip()[:120] or None, prato, int(bool(ja_tem)), _now()))
+        return int(cur.lastrowid)
+
+    def carrinho_adicionar(self, nome: str, preco_total: float, quantidade: Optional[float] = 1.0, unidade: Optional[str] = None, *,
+                           estimado: bool = False, origem: str = "manual", receita_id: Optional[int] = None,
+                           motivo: Optional[str] = None, prato: Optional[str] = None, ja_tem: bool = False) -> dict[str, Any]:
+        """Põe o ingrediente no carrinho se couber no saldo (``ja_tem``: já está na despensa, tem valor mas não gasta saldo)."""
+        nome = _nome_limpo(nome, "item")
+        preco = round(_numero(preco_total, "preço"), 2)
+        if preco < 0 or (preco == 0 and not ja_tem):
+            raise ValueError("informe o preço do item (maior que zero)")
+        qtd = 1.0 if quantidade is None else _numero(quantidade, "quantidade")
+        if qtd <= 0:
+            raise ValueError("a quantidade precisa ser maior que zero")
+        un = _unidade_limpa(unidade)
+        custo = 0.0 if ja_tem else preco
+        with _LOCK:
+            saldo = self.carrinho_resumo()["saldo"]
+            if custo > saldo + 1e-9:
+                raise OrcamentoEstourado(custo - saldo, saldo)
+            with self.connect() as conn:
+                item_id = self._gravar_linha(conn, nome, preco, qtd, un, estimado=estimado, origem=origem, receita_id=receita_id,
+                                             motivo=motivo, prato=prato, ja_tem=ja_tem)
+                row = conn.execute("SELECT * FROM carrinho WHERE id = ?", (item_id,)).fetchone()
+        return _item_carrinho(row)
+
+    def carrinho_adicionar_prato(self, prato: str, ingredientes: Any, *, estimado: bool = False, origem: str = "manual",
+                                 receita_id: Optional[int] = None) -> dict[str, Any]:
+        """Põe um prato inteiro: uma linha por ingrediente, cada uma com o seu valor. Só o que ela compra gasta saldo."""
+        nome_prato = _nome_limpo(prato, "prato")
+        linhas = _linhas_do_prato(ingredientes)
+        a_comprar = round(sum(l["preco_total"] for l in linhas if not l["ja_tem"]), 2)
+        with _LOCK:
+            saldo = self.carrinho_resumo()["saldo"]
+            if a_comprar > saldo + 1e-9:
+                raise OrcamentoEstourado(a_comprar - saldo, saldo)
+            with self.connect() as conn:
+                for l in linhas:
+                    self._gravar_linha(conn, l["nome"], l["preco_total"], l["quantidade"], l["unidade"], estimado=estimado, origem=origem,
+                                       receita_id=receita_id, motivo=None, prato=nome_prato, ja_tem=l["ja_tem"])
+        return next(g for g in self.carrinho_pratos() if norm_text(g["prato"]) == norm_text(nome_prato))
+
+    def carrinho_atualizar_quantidade(self, item_id: int, quantidade: float) -> dict[str, Any]:
+        """Muda a quantidade mantendo o preço por unidade (o total da linha acompanha)."""
+        qtd = _numero(quantidade, "quantidade")
+        if qtd <= 0:
+            raise ValueError("a quantidade precisa ser maior que zero; para tirar o item, remova-o")
+        with _LOCK:
+            saldo = self.carrinho_resumo()["saldo"]
+            with self.connect() as conn:
+                row = conn.execute("SELECT * FROM carrinho WHERE id = ?", (int(item_id),)).fetchone()
+                if row is None:
+                    raise KeyError(f"o item {item_id} não está no carrinho")
+                novo_total = round(row["preco_total"] / row["quantidade"] * qtd, 2)
+                aumento = round(novo_total - row["preco_total"], 2)
+                if not row["ja_tem"] and aumento > saldo + 1e-9:
+                    raise OrcamentoEstourado(aumento - saldo, saldo)
+                conn.execute("UPDATE carrinho SET quantidade = ?, preco_total = ? WHERE id = ?", (qtd, novo_total, row["id"]))
+                row = conn.execute("SELECT * FROM carrinho WHERE id = ?", (row["id"],)).fetchone()
+        return _item_carrinho(row)
+
+    def carrinho_remover(self, item_id: Optional[int] = None, nome: Optional[str] = None) -> list[dict[str, Any]]:
+        """Tira do carrinho pelo id ou pelo nome: ingrediente, ou o prato inteiro quando o nome é o do prato.
+        Nome parecido só vale se der um único item (senão pede para ela dizer qual). Devolve o que saiu."""
+        with _LOCK, self.connect() as conn:
+            linhas = conn.execute("SELECT * FROM carrinho ORDER BY id").fetchall()
+            if item_id is not None:
+                alvo = [r for r in linhas if r["id"] == int(item_id)]
+            else:
+                chave = norm_text(nome or "")
+                if not chave:
+                    raise ValueError("informe o item (nome ou id)")
+                alvo = [r for r in linhas if norm_text(r["nome"]) == chave]
+                if not alvo:
+                    alvo = [r for r in linhas if r["prato"] and norm_text(r["prato"]) == chave]
+                if not alvo:
+                    parecidos: dict[str, tuple[str, list[sqlite3.Row]]] = {}
+                    for r in linhas:
+                        for rotulo in (r["nome"], r["prato"]):
+                            n = norm_text(rotulo or "")
+                            if n and (chave in n or n in chave):
+                                parecidos.setdefault(n, (rotulo, []))[1].append(r)
+                    if len(parecidos) > 1:
+                        raise ValueError("há mais de um item parecido no carrinho (" + ", ".join(v[0] for v in parecidos.values()) + "); diga qual")
+                    alvo = next(iter(parecidos.values()))[1] if parecidos else []
+            if not alvo:
+                raise KeyError("esse item não está no carrinho")
+            ids = sorted({r["id"] for r in alvo})
+            conn.execute(f"DELETE FROM carrinho WHERE id IN ({','.join('?' * len(ids))})", ids)
+        return [_item_carrinho(r) for r in alvo]
+
+    def carrinho_remover_prato(self, prato: str) -> list[dict[str, Any]]:
+        with _LOCK, self.connect() as conn:
+            alvo = [r for r in conn.execute("SELECT * FROM carrinho ORDER BY id").fetchall() if r["prato"] and norm_text(r["prato"]) == norm_text(prato)]
+            if not alvo:
+                raise KeyError(f"o prato {prato!r} não está no carrinho")
+            conn.execute(f"DELETE FROM carrinho WHERE id IN ({','.join('?' * len(alvo))})", [r["id"] for r in alvo])
+        return [_item_carrinho(r) for r in alvo]
+
+    def carrinho_limpar(self) -> int:
+        with _LOCK, self.connect() as conn:
+            return conn.execute("DELETE FROM carrinho").rowcount
+
+    def carrinho_montar_da_receita(self, receita_id: int, receita_nome: str, compras: list[dict[str, Any]],
+                                   da_despensa: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+        """Troca as linhas desta receita pelo prato completo: o que ela compra (os preços da conferência) e o que já tem na
+        despensa (com o custo, sem gastar saldo). Repetir não duplica; respeita o saldo."""
+        a_comprar = [(str(c.get("ingrediente") or "").strip(), c.get("quantidade"), c.get("unidade"), round(float(c.get("preco_estimado") or 0), 2))
+                     for c in compras]
+        a_comprar = [item for item in a_comprar if item[0] and item[3] > 0]
+        da_casa = [(str(c.get("ingrediente") or "").strip(), c.get("quantidade"), c.get("unidade"), round(float(c.get("valor") or 0), 2))
+                   for c in (da_despensa or [])]
+        da_casa = [item for item in da_casa if item[0]]
+        prato = receita_nome.strip()[:80]
+        with _LOCK:
+            saldo = self.carrinho_resumo()["saldo"]
+            with self.connect() as conn:
+                antigo = float(conn.execute("SELECT COALESCE(SUM(preco_total), 0) FROM carrinho WHERE receita_id = ? AND ja_tem = 0", (int(receita_id),)).fetchone()[0])
+                novo = round(sum(item[3] for item in a_comprar), 2)
+                disponivel = round(saldo + antigo, 2)
+                if novo > disponivel + 1e-9:
+                    raise OrcamentoEstourado(novo - disponivel, disponivel)
+                conn.execute("DELETE FROM carrinho WHERE receita_id = ?", (int(receita_id),))
+                for ja_tem, itens in ((1, da_casa), (0, a_comprar)):
+                    for nome, qtd, un, valor in itens:
+                        conn.execute(
+                            "INSERT INTO carrinho(nome, quantidade, unidade, preco_total, estimado, origem, receita_id, motivo, prato, ja_tem, criado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                            (nome[:80], float(qtd) if qtd else 1.0, str(un)[:20] if un else None, valor, 0 if ja_tem else 1, "receita",
+                             int(receita_id), None, prato, ja_tem, _now()))
+                rows = conn.execute("SELECT * FROM carrinho WHERE receita_id = ? ORDER BY id", (int(receita_id),)).fetchall()
+        return [_item_carrinho(r) for r in rows]
+
+    def carrinho_baixar_receita(self, receita_id: int) -> int:
+        """O prato desta receita foi aceito: as linhas viram compras comprometidas e saem do carrinho."""
+        with _LOCK, self.connect() as conn:
+            return conn.execute("DELETE FROM carrinho WHERE receita_id = ?", (int(receita_id),)).rowcount
+
+    # ------------------------------------------------------------------ pratos e ingredientes salvos
+    def salvos(self) -> dict[str, list[dict[str, Any]]]:
+        """O que ela guardou para usar de novo: pratos (com ingredientes e valores) e ingredientes avulsos."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM salvos ORDER BY nome_norm").fetchall()
+        itens = [_salvo(r) for r in rows]
+        return {"pratos": [s for s in itens if s["tipo"] == "prato"], "ingredientes": [s for s in itens if s["tipo"] == "ingrediente"]}
+
+    def salvo_obter(self, salvo_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM salvos WHERE id = ?", (int(salvo_id),)).fetchone()
+        if row is None:
+            raise KeyError(f"o item salvo {salvo_id} não existe")
+        return _salvo(row)
+
+    def salvo_por_nome(self, tipo: str, nome: str) -> Optional[dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM salvos WHERE tipo = ? AND nome_norm = ?", (tipo, norm_text(nome or ""))).fetchone()
+        return _salvo(row) if row else None
+
+    def salvo_salvar(self, tipo: str, nome: str, *, preco_total: Any = None, quantidade: Any = None, unidade: Any = None,
+                     ingredientes: Any = None, origem: str = "tela") -> dict[str, Any]:
+        """Guarda um prato (com os ingredientes e o valor de cada um) ou um ingrediente avulso. Mesmo nome atualiza."""
+        tipo = str(tipo or "").strip().lower()
+        if tipo not in ("prato", "ingrediente"):
+            raise ValueError("o tipo precisa ser 'prato' ou 'ingrediente'")
+        nome = _nome_limpo(nome, tipo)
+        if tipo == "prato":
+            linhas = _linhas_do_prato(ingredientes)
+            dados: tuple[Any, ...] = (None, None, round(sum(l["preco_total"] for l in linhas), 2), json.dumps(linhas, ensure_ascii=False))
+        else:
+            preco = round(_numero(preco_total, "preço"), 2)
+            if preco <= 0:
+                raise ValueError("informe o preço do ingrediente (maior que zero)")
+            qtd = 1.0 if quantidade in (None, "") else _numero(quantidade, "quantidade")
+            if qtd <= 0:
+                raise ValueError("a quantidade precisa ser maior que zero")
+            dados = (qtd, _unidade_limpa(unidade), preco, None)
+        agora = _now()
+        with _LOCK, self.connect() as conn:
+            conn.execute(
+                """INSERT INTO salvos(tipo, nome, nome_norm, quantidade, unidade, preco_total, ingredientes, origem, criado_em, atualizado_em)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(tipo, nome_norm) DO UPDATE SET nome = excluded.nome, quantidade = excluded.quantidade, unidade = excluded.unidade,
+                     preco_total = excluded.preco_total, ingredientes = excluded.ingredientes, origem = excluded.origem, atualizado_em = excluded.atualizado_em""",
+                (tipo, nome, norm_text(nome), *dados, origem, agora, agora))
+            row = conn.execute("SELECT * FROM salvos WHERE tipo = ? AND nome_norm = ?", (tipo, norm_text(nome))).fetchone()
+        return _salvo(row)
+
+    def salvo_remover(self, salvo_id: int) -> dict[str, Any]:
+        item = self.salvo_obter(salvo_id)
+        with _LOCK, self.connect() as conn:
+            conn.execute("DELETE FROM salvos WHERE id = ?", (int(salvo_id),))
+        return item
+
+    def salvar_do_carrinho(self, *, prato: Optional[str] = None, nome: Optional[str] = None, origem: str = "tela") -> dict[str, Any]:
+        """Guarda o que já está no carrinho: o prato inteiro (com os ingredientes) ou um ingrediente avulso."""
+        if prato:
+            grupo = next((g for g in self.carrinho_pratos() if norm_text(g["prato"]) == norm_text(prato)), None)
+            if grupo is None:
+                raise KeyError(f"o prato {prato!r} não está no carrinho")
+            ingredientes = [{"nome": i["nome"], "quantidade": i["quantidade"], "unidade": i["unidade"], "preco_total": i["preco_total"],
+                             "ja_tem": i["ja_tem"]} for i in grupo["ingredientes"]]
+            return self.salvo_salvar("prato", grupo["prato"], ingredientes=ingredientes, origem=origem)
+        linha = next((i for i in self.carrinho_itens() if not i["prato"] and norm_text(i["nome"]) == norm_text(nome or "")), None)
+        if linha is None:
+            raise KeyError(f"o ingrediente {nome!r} não está avulso no carrinho")
+        return self.salvo_salvar("ingrediente", linha["nome"], preco_total=linha["preco_total"], quantidade=linha["quantidade"],
+                                 unidade=linha["unidade"], origem=origem)
+
+    def carrinho_do_salvo(self, salvo_id: int) -> dict[str, Any]:
+        """Põe no carrinho um prato ou ingrediente salvo (respeita o saldo)."""
+        s = self.salvo_obter(salvo_id)
+        if s["tipo"] == "ingrediente":
+            return {"tipo": "ingrediente", "item": self.carrinho_adicionar(s["nome"], s["preco_total"], s["quantidade"], s["unidade"], origem="salvo")}
+        return {"tipo": "prato", "prato": self.carrinho_adicionar_prato(s["nome"], s["ingredientes"], origem="salvo")}
+
+    # ------------------------------------------------------------------ perfil do negócio
+    def negocio(self) -> Optional[dict[str, Any]]:
+        with self.connect() as conn:
+            bruto = self._config_get(conn, "negocio")
+        return json.loads(bruto) if bruto else None
+
+    def negocio_salvar(self, dados: Any) -> dict[str, Any]:
+        limpo = {**negocio_mod.normalizar(dados), "atualizado_em": _now()}
+        with _LOCK, self.connect() as conn:
+            self._config_set(conn, "negocio", json.dumps(limpo, ensure_ascii=False))
+        return limpo

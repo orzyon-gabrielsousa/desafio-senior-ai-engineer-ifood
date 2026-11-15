@@ -2,11 +2,12 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 INFERENCE_HOST_PORT ?= 8010
+PLAYGROUND_HOST_PORT ?= 3000
 MODEL_REPO ?= unsloth/Qwen3-8B-GGUF
 MODEL_FILE ?= Qwen3-8B-Q4_K_M.gguf
 Q ?= Liste três itens da despensa com o custo unitário de cada um.
 
-.PHONY: help setup model up down restart logs status chat ask test validate smoke reset-dados shell up-max down-max
+.PHONY: help setup model up down restart logs status chat ask test validate smoke reset-dados shell up-max down-max playground playground-dev
 
 help: ## mostra esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -23,15 +24,15 @@ model: ## baixa o GGUF do Qwen3-8B (MODEL_REPO/MODEL_FILE) para ./models
 	 (curl -L --fail --retry 5 --retry-delay 5 -C - -o models/$(MODEL_FILE).part \
 	   "https://huggingface.co/$(MODEL_REPO)/resolve/main/$(MODEL_FILE)" && mv models/$(MODEL_FILE).part models/$(MODEL_FILE))
 
-up: ## sobe inferência (perfil do .env), SearXNG e Hermes
-	$(COMPOSE) up -d
+up: ## sobe inferência (perfil do .env), SearXNG, Hermes e o playground
+	$(COMPOSE) up -d --build
 	@$(MAKE) --no-print-directory status
 
 down: ## derruba tudo
 	$(COMPOSE) --profile llamacpp --profile max down
 
-restart: ## reinicia só o Hermes (depois de editar config/SOUL/plugin)
-	$(COMPOSE) restart hermes
+restart: ## reinicia o Hermes e a API do carrinho (depois de editar config/SOUL/plugin)
+	$(COMPOSE) restart hermes api
 
 logs: ## logs de todos os serviços
 	$(COMPOSE) logs -f --tail=100
@@ -41,6 +42,8 @@ status: ## saúde dos serviços
 	@echo "--- inference"; curl -fsS http://localhost:$(INFERENCE_HOST_PORT)/health && echo || echo "(ainda não respondeu)"
 	@echo "--- searxng";   curl -fsS "http://localhost:8888/search?q=teste&format=json" -o /dev/null -w "HTTP %{http_code}\n" || echo "(ainda não respondeu)"
 	@echo "--- hermes api"; curl -fsS http://localhost:8642/health && echo || echo "(API server ainda não respondeu)"
+	@echo "--- api (carrinho, via nginx)"; curl -fsS http://localhost:$(PLAYGROUND_HOST_PORT)/api/saude && echo || echo "(ainda não respondeu)"
+	@echo "--- playground  http://localhost:$(PLAYGROUND_HOST_PORT)"; curl -fsS -o /dev/null -w "HTTP %{http_code}\n" http://localhost:$(PLAYGROUND_HOST_PORT)/ || echo "(ainda não respondeu)"
 
 chat: ## abre a TUI do Hermes com o playbook pré-carregado (a demo)
 	$(COMPOSE) exec -it hermes hermes chat -s consultoria-cardapio
@@ -74,3 +77,10 @@ up-max: ## sobe o perfil experimental MAX no lugar do llama.cpp
 down-max: ## volta para o llama.cpp
 	$(COMPOSE) --profile max stop inference-max || true
 	$(COMPOSE) --profile llamacpp up -d inference-llamacpp
+
+playground: ## reconstrói e sobe só o playground (http://localhost:3000)
+	$(COMPOSE) up -d --build playground
+
+playground-dev: ## playground com recarga rápida; precisa de Node 20+ e do Hermes no ar
+	@test -d playground/node_modules || npm install --prefix playground
+	npm run dev --prefix playground

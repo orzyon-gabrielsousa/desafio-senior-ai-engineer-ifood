@@ -1,0 +1,45 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # A chave fica só neste proxy. O JavaScript do navegador chama /hermes/ na mesma origem.
+    location /hermes/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $hermes_upstream hermes:8642;
+        rewrite ^/hermes/(.*)$ /$1 break;
+        gzip off;
+        proxy_pass http://$hermes_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host hermes:8642;
+        proxy_set_header Origin "";
+        proxy_set_header Authorization "Bearer ${API_SERVER_KEY}";
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+        add_header X-Accel-Buffering no;
+    }
+
+    # Carrinho, saldo e perfil do negócio: API pequena (stdlib) sobre o mesmo SQLite do plugin.
+    location /api/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $api_upstream api:8700;
+        gzip off;
+        proxy_pass http://$api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 30s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

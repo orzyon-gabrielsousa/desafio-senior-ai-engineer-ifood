@@ -5,6 +5,8 @@
 #   inference-max       (perfil "max", experimental) Modular MAX + Qwen3.5-4B,  GPU, porta 8000
 #   searxng             metabuscador local (web_search do Hermes), porta 8888
 #   hermes              Hermes Agent (gateway + API server + TUI via exec),   porta 8642
+#   api                 carrinho, saldo e perfil do negócio (Python stdlib, mesmo SQLite), porta 8700
+#   playground          React (chat da consultora), nginx faz proxy das APIs, porta 3000
 #
 # Os dois motores de inferência respondem pelo alias de rede "inference"; o Hermes
 # aponta para http://inference:8000/v1. Escolha o motor com COMPOSE_PROFILES no .env
@@ -39,6 +41,9 @@ services:
     # contexto é estendido para 65 536 com YaRN (fator 2 sobre 32 768, como a Qwen
     # recomenda). KV cache quantizado (K q8_0, V q4_0) para caber nos 16 GB da
     # RTX 5070 Ti junto com o desktop. Amostragem recomendada pela Qwen.
+    # Teto de tokens por resposta (--n-predict): o Qwen3-8B às vezes não para de gerar (já vimos 7 mil e
+    # 18 mil tokens num turno só) e a placa, dividida com o desktop, chegou a derrubar o servidor com
+    # "CUDA error: the launch timed out". Uma resposta legítima daqui usa menos de 2 mil tokens.
     command: >
       --model /models/${LLAMA_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}
       --alias ${MODEL_NAME:-qwen3-8b}
@@ -49,6 +54,7 @@ services:
       --flash-attn on
       --cache-type-k q8_0 --cache-type-v ${LLAMA_KV_V_TYPE:-q4_0}
       --parallel 1
+      --n-predict ${LLAMA_N_PREDICT:-4096}
       --jinja
       --reasoning-budget ${LLAMA_REASONING_BUDGET:-0}
       --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0
@@ -139,6 +145,8 @@ services:
       - ./hermes-home:/opt/data
       # Planilha da Dona Maria (entrada do desafio), somente leitura.
       - ./data:/opt/data/sabor_da_maria/entrada:ro
+      # Base de conhecimento do Analytics (pratos mais vendidos por zona, cidade, estado, região e país), somente leitura.
+      - ./prompts:/prompts:ro
     environment:
       # Arquivos criados pelo container ficam com o seu usuário do host.
       HERMES_UID: ${HERMES_UID:-1000}
@@ -149,13 +157,66 @@ services:
       SABOR_DA_MARIA_XLSX: /opt/data/sabor_da_maria/entrada/despensa_dona_maria.xlsx
       SABOR_DA_MARIA_DB: /opt/data/sabor_da_maria/sabor_da_maria.db
       SABOR_DA_MARIA_ORCAMENTO: "${SABOR_DA_MARIA_ORCAMENTO:-80}"
+      SABOR_DA_MARIA_BASE_CONHECIMENTO: /prompts/base-de-conhecimento
       # API server OpenAI-compatible (http://localhost:8642/v1/chat/completions) para um
       # frontend próprio; a chave é local e o bind é só no loopback do host.
       API_SERVER_ENABLED: "${API_SERVER_ENABLED:-true}"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_KEY: ${API_SERVER_KEY:-sabor-da-maria-chave-local}
-      API_SERVER_CORS_ORIGINS: ${API_SERVER_CORS_ORIGINS:-http://localhost:3000}
+      API_SERVER_CORS_ORIGINS: ${API_SERVER_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       # Webapp/dashboard (opcionais) exigem login básico quando ligados.
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}
     command: ["gateway", "run"]
+
+  api:
+    # Reaproveita a imagem do Hermes: é o mesmo Python em que o plugin roda e não há nada novo para baixar.
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.23.1}
+    container_name: sabor-api
+    restart: unless-stopped
+    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    working_dir: /app
+    entrypoint: ["/opt/hermes/.venv/bin/python3", "-m", "sabor_da_maria.api"]
+    ports:
+      # Só loopback: o navegador chega aqui pelo nginx do playground (/api/); a porta serve ao `make playground-dev`.
+      - "127.0.0.1:${API_HOST_PORT:-8700}:8700"
+    volumes:
+      # Mesmo código e mesmo SQLite do plugin: a tela e a consultora enxergam o mesmo carrinho, sem regra duplicada.
+      - ./hermes-home/plugins:/app:ro
+      - ./hermes-home/sabor_da_maria:/data
+      - ./data:/data/entrada:ro
+      - ./prompts:/prompts:ro
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      SABOR_DA_MARIA_XLSX: /data/entrada/despensa_dona_maria.xlsx
+      SABOR_DA_MARIA_DB: /data/sabor_da_maria.db
+      SABOR_DA_MARIA_ORCAMENTO: "${SABOR_DA_MARIA_ORCAMENTO:-80}"
+      SABOR_DA_MARIA_BASE_CONHECIMENTO: /prompts/base-de-conhecimento
+      SABOR_DA_MARIA_API_PORT: "8700"
+    healthcheck:
+      test: ["CMD", "/opt/hermes/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8700/api/saude', timeout=2)"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
+      start_period: 5s
+
+  playground:
+    build: ./playground
+    image: sabor-da-maria-playground
+    container_name: sabor-playground
+    restart: unless-stopped
+    depends_on:
+      hermes:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PLAYGROUND_HOST_PORT:-3000}:80"
+    environment:
+      API_SERVER_KEY: ${API_SERVER_KEY:-sabor-da-maria-chave-local}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

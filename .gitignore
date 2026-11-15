@@ -27,6 +27,10 @@ hermes-home/memories/*
 hermes-home/workspace/*
 !hermes-home/workspace/AGENTS.md
 
+# playground (React)
+playground/node_modules/
+playground/dist/
+
 # python
 __pycache__/
 *.pyc

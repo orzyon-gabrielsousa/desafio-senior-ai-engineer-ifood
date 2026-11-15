@@ -9,6 +9,8 @@ As tools cobrem as quatro etapas do desafio:
 * 2.1/2.3  despensa_listar, despensa_buscar, despensa_atualizar, receita_conferir_ingredientes
 * 2.2      perfil_cozinha_consultar, perfil_cozinha_salvar (elicitação com checklist)
 * 2.4      prato_calcular_cmv, preco_sugerir, cardapio_registrar, cardapio_remover, cardapio_consultar
+* carrinho  carrinho_consultar, carrinho_adicionar, carrinho_adicionar_prato, carrinho_remover, carrinho_montar_da_receita, salvos_salvar
+            (saldo = orçamento − carrinho; a tela da Dona Maria mexe no mesmo carrinho pela API)
 
 Travas no backend (não dependem do que o modelo diz): ``prato_calcular_cmv`` e
 ``cardapio_registrar`` reavaliam o prato contra o estado atual (perfil salvo, despensa
@@ -20,13 +22,16 @@ se CMV/compras mudaram desde a apresentação, e só ele reserva estoque e compr
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import logging
+import os
 from typing import Any, Callable, Optional
 
-from . import costing
+from . import analytics, costing, falas
+from . import negocio as negocio_mod
 from .matching import tokens
-from .store import Store
+from .store import OrcamentoEstourado, Store
 from .units import format_base, norm_text, parse_pantry_unit, to_base
 
 logger = logging.getLogger(__name__)
@@ -38,11 +43,19 @@ def _json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
-def _tool(fn: Callable[[dict], dict]) -> Callable[..., str]:
+def _tool(fn: Callable[..., dict]) -> Callable[..., str]:
+    # O Hermes só entrega session_id, task_id etc. ao handler que os declara na assinatura (com functools.wraps a
+    # assinatura de `wrapper` é a de `fn`): a tool pede o que precisa e o resto é descartado aqui.
+    contexto = {nome for nome in inspect.signature(fn).parameters if nome != "args"}
+
     @functools.wraps(fn)
     def wrapper(args: Optional[dict] = None, **kwargs: Any) -> str:
         try:
-            return _json(fn(dict(args or {})))
+            return _json(fn(dict(args or {}), **{k: v for k, v in kwargs.items() if k in contexto}))
+        except (ValueError, KeyError) as exc:  # pedido que não dá para atender: o modelo lê o motivo e corrige, sem traceback no log
+            motivo = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc  # str(KeyError) vem entre aspas
+            logger.warning("tool %s recusou o pedido: %s", fn.__name__, motivo, exc_info=logger.isEnabledFor(logging.DEBUG))
+            return _json({"success": False, "error": f"{type(exc).__name__}: {motivo}"})
         except Exception as exc:  # noqa: BLE001 - o modelo precisa ver o erro, não um traceback
             logger.exception("tool %s falhou", fn.__name__)
             return _json({"success": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -175,21 +188,91 @@ def perfil_cozinha_consultar(args: dict) -> dict:
     }
 
 
+# Palavras com que ela costuma falar de cada restrição (o nome da chave quase nunca é o que ela diz).
+_NEEDLES_RESTRICOES: dict[str, tuple[str, ...]] = {
+    "espaco_geladeira": ("geladeira", "refrigerador", "freezer"),
+    "tempo_por_cozinhada_min": ("hora", "horas", "minuto", "minutos", "tempo", "cozinhada"),
+    "gas": ("gas", "botijao", "encanado"),
+    "energia": ("energia", "luz", "eletrica", "tomada"),
+}
+
+
+def _termos(grupo: str, chave: str) -> tuple[str, ...]:
+    """Como ela diria isso: sinônimos do equipamento ou da restrição; para técnica, o próprio nome."""
+    if grupo == "equipamentos":
+        for key, needles in _EQUIPAMENTOS:
+            if key == chave:
+                return needles
+    if grupo == "restricoes" and chave in _NEEDLES_RESTRICOES:
+        return _NEEDLES_RESTRICOES[chave]
+    return (chave.replace("_", " "),)
+
+
+def _sem_apoio(grupo: str, chave: str, valor: Any, falas_dela: list[falas.Fala]) -> Optional[str]:
+    """Motivo para recusar o item, ou ``None`` quando alguma fala dela o sustenta."""
+    nome = chave.replace("_", " ")
+    if not falas.apoia(_termos(grupo, chave), falas_dela):
+        return f"ela não falou de {nome}"
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        if not falas.apoia_numero(float(valor), falas_dela, minutos=chave.endswith("_min")):
+            return f"o número {valor:g} de {nome} não aparece no que ela disse"
+    return None
+
+
+def _conferir_falas() -> bool:
+    """Liga a trava de evidência (padrão). ``SABOR_DA_MARIA_CONFERIR_FALAS=0`` desliga, só para depuração."""
+    return os.environ.get("SABOR_DA_MARIA_CONFERIR_FALAS", "1").strip().lower() not in {"0", "false", "off", "nao", "não"}
+
+
 @_tool
-def perfil_cozinha_salvar(args: dict) -> dict:
+def perfil_cozinha_salvar(args: dict, session_id: Optional[str] = None) -> dict:
+    """Grava só o que ela disse. Cada item é conferido com as falas dela (mensagens e respostas do clarify);
+    o que ela não falou volta em ``recusados`` e NÃO entra no perfil, nem que o modelo ache óbvio."""
     store = Store()
-    partes: dict[str, Any] = {}
-    for chave in ("equipamentos", "tecnicas", "restricoes"):
-        valor = args.get(chave)
+    pedido: dict[str, dict[str, Any]] = {}
+    for grupo in ("equipamentos", "tecnicas", "restricoes"):
+        valor = args.get(grupo)
+        if isinstance(valor, list):
+            valor = {str(k): True for k in valor}
         if isinstance(valor, dict):
-            partes[chave] = {(_equip_key(k) if chave == "equipamentos" else k): v for k, v in valor.items()}
-        elif isinstance(valor, list):
-            partes[chave] = {(_equip_key(str(k)) if chave == "equipamentos" else str(k)): True for k in valor}
-    if args.get("observacoes"):
-        partes["observacoes"] = args["observacoes"]
-    perfil = store.perfil_salvar(partes)
+            pedido[grupo] = {(_equip_key(str(k)) if grupo == "equipamentos" else norm_text(str(k)).replace(" ", "_")): v
+                             for k, v in valor.items()}
+    observacoes = args.get("observacoes")
+    observacoes = observacoes if isinstance(observacoes, list) else ([observacoes] if observacoes else [])
+
+    verificar = _conferir_falas()
+    falas_dela = falas.da_sessao(session_id) if verificar else []
+    sem_fala = "ainda não tenho a fala dela nesta conversa; peça para ela contar de novo"
+    aceitos: dict[str, Any] = {}
+    recusados: list[dict[str, Any]] = []
+    for grupo, itens in pedido.items():
+        for chave, valor in itens.items():
+            motivo = None if not verificar else (sem_fala if falas_dela is None else _sem_apoio(grupo, chave, valor, falas_dela))
+            if motivo:
+                recusados.append({"grupo": grupo, "chave": chave, "valor": valor, "motivo": motivo})
+            else:
+                aceitos.setdefault(grupo, {})[chave] = valor
+    for obs in observacoes:
+        texto = str(obs).strip()
+        if not texto:
+            continue
+        if verificar and (falas_dela is None or falas.cobertura(texto, falas_dela) < 0.6):
+            recusados.append({"grupo": "observacoes", "chave": texto[:60], "motivo": sem_fala if falas_dela is None else "não encontrei isso no que ela disse"})
+        else:
+            aceitos.setdefault("observacoes", []).append(texto)
+
+    perfil = store.perfil_salvar(aceitos) if aceitos else store.perfil()
     pend = _pendencias_perfil(perfil)
-    return {"success": True, "perfil": perfil, "pendencias": pend, "completo": not pend}
+    resposta: dict[str, Any] = {"success": not recusados or bool(aceitos), "perfil": perfil, "pendencias": pend,
+                                "completo": not pend, "salvo": aceitos}
+    if recusados:
+        resposta.update({
+            "bloqueado": not aceitos,
+            "recusados": recusados,
+            "aviso": ("Os itens em 'recusados' NÃO foram salvos: a Dona Maria não disse isso. Não preencha por ela. "
+                      "Pergunte (um item de cada vez, com as palavras do item) e salve só o que ela responder."),
+        })
+    return resposta
 
 
 # ----------------------------------------------------------------------------- despensa (2.3)
@@ -295,7 +378,8 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
             continue
         qtd = _num(ing.get("quantidade"), 0.0) or 0.0
         unidade = str(ing.get("unidade") or "un")
-        linha: dict[str, Any] = {"ingrediente": nome, "quantidade_receita": f"{qtd:g} {unidade}".strip(), "opcional": bool(ing.get("opcional"))}
+        linha: dict[str, Any] = {"ingrediente": nome, "quantidade_receita": f"{qtd:g} {unidade}".strip(), "qtd_num": qtd, "unidade_receita": unidade,
+                 "opcional": bool(ing.get("opcional"))}
         explicito = "item_despensa" in ing
         alvo = ing.get("item_despensa")
         item = None
@@ -771,6 +855,8 @@ def cardapio_registrar(args: dict) -> dict:
              "registro": {"preco_escolhido": preco, "porcoes": porcoes, "cmv_por_porcao": cmv_porcao}}
     confirmado = store.aceitar_prato(prato_id, preco, res["compras"], _reservas_de(res),
                                      confirmar_compras=bool(args.get("confirmar_compras", True)), dados=dados)
+    # As compras da receita agora são compromisso do prato: saem do carrinho para o mesmo gasto não contar duas vezes.
+    baixados = store.carrinho_baixar_receita(int(receita["id"]))
     avaliacao = costing.avaliar_preco(preco, float(cmv_porcao or 0))
     alertas: list[str] = []
     if not avaliacao["viavel"]:
@@ -786,6 +872,8 @@ def cardapio_registrar(args: dict) -> dict:
         "compras_registradas": res["compras"],
         "reservas_registradas": [{k: r[k] for k in ("ingrediente", "quantidade")} for r in final.reservas_do_prato(prato_id)],
         "orcamento": final.orcamento(),
+        "linhas_do_carrinho_que_viraram_compras": baixados,
+        "diga_a_dona_maria": _texto_saldo(final.carrinho_resumo()),
         "alertas": alertas,
         "nota": ("Estoque reservado e orçamento comprometido para este prato. Lembre a Dona Maria de lançar as compras reais com "
                  "despensa_atualizar(compra=...) quando ela voltar do mercado. Para tirar o prato do cardápio: cardapio_remover."),
@@ -841,6 +929,229 @@ def cardapio_consultar(args: dict) -> dict:
     }
 
 
+# ----------------------------------------------------------------------------- carrinho e saldo
+def _texto_saldo(resumo: dict[str, Any]) -> str:
+    """Frase pronta para a consultora repetir: o que ela tem, o que já escolheu e o que sobra."""
+    partes = [f"orçamento {costing.brl(resumo['inicial'])}"]
+    if resumo["comprometido"]:
+        partes.append(f"já comprometido em pratos {costing.brl(resumo['comprometido'])}")
+    partes.append(f"no carrinho {costing.brl(resumo['carrinho'])}")
+    partes.append(f"saldo {costing.brl(resumo['saldo'])}")
+    return " · ".join(partes)
+
+
+def _qtd_texto(quantidade: Any, unidade: Optional[str]) -> str:
+    return f"{float(quantidade):g} {unidade or ''}".strip()
+
+
+def _texto_prato(grupo: dict[str, Any]) -> str:
+    """O prato aberto, pronto para a conversa: cada ingrediente com a quantidade e o valor, e o total do prato."""
+    cabecalho = f"{grupo['prato']}: {costing.brl(grupo['valor_do_prato'])}"
+    if abs(grupo["a_comprar"] - grupo["valor_do_prato"]) > 0.004:
+        cabecalho += f" (a comprar {costing.brl(grupo['a_comprar'])})"
+    linhas = [f"- {i['nome']} ({_qtd_texto(i['quantidade'], i['unidade'])}): {costing.brl(i['preco_total'])}"
+              + (" — já tem na despensa" if i["ja_tem"] else "") for i in grupo["ingredientes"]]
+    return "\n".join([cabecalho, *linhas])
+
+
+def _legivel_base(quantidade: float, base: str) -> tuple[float, str]:
+    """Quantidade na unidade-base da despensa (kg, L, un) para algo que se lê: 0,03 kg vira 30 g."""
+    if base == "kg" and quantidade < 1:
+        return round(quantidade * 1000, 1), "g"
+    if base == "L" and quantidade < 1:
+        return round(quantidade * 1000, 1), "ml"
+    return round(quantidade, 3), base
+
+
+def _salvos_resumo(store: Store) -> dict[str, Any]:
+    s = store.salvos()
+    return {"pratos": [{"nome": p["nome"], "valor": p["preco_total"], "ingredientes": len(p["ingredientes"])} for p in s["pratos"]],
+            "ingredientes": [{"nome": i["nome"], "valor": i["preco_total"], "quantidade": i["quantidade"], "unidade": i["unidade"]}
+                             for i in s["ingredientes"]]}
+
+
+def _carrinho_resposta(store: Store, **extra: Any) -> dict[str, Any]:
+    resumo = store.carrinho_resumo()
+    avulsos = [{k: i[k] for k in ("id", "nome", "quantidade", "unidade", "preco_total", "estimado", "motivo")}
+               for i in store.carrinho_itens() if not i["prato"]]
+    return {"success": True, "carrinho": avulsos, "pratos": store.carrinho_pratos(), "resumo": resumo,
+            "diga_a_dona_maria": _texto_saldo(resumo), **extra}
+
+
+def _recusa_saldo(exc: OrcamentoEstourado, store: Store) -> dict[str, Any]:
+    resumo = store.carrinho_resumo()
+    return {"success": False, "bloqueado": True, "error": str(exc), "falta": exc.falta, "resumo": resumo,
+            "diga_a_dona_maria": _texto_saldo(resumo),
+            "proximos_passos": ["diga quanto falta e pergunte se ela prefere tirar um item do carrinho (carrinho_remover) ou trocar por um mais barato"]}
+
+
+def _e_prato(store: Store, nome: str) -> bool:
+    """Nome de prato (um dos salvos ou da base de pratos mais vendidos): não entra no carrinho como item de preço fechado."""
+    return store.salvo_por_nome("prato", nome) is not None or analytics.e_prato(nome)
+
+
+@_tool
+def carrinho_consultar(args: dict) -> dict:
+    store = Store()
+    negocio = store.negocio()
+    return _carrinho_resposta(store, negocio=negocio, negocio_resumo=negocio_mod.descrever(negocio), salvos=_salvos_resumo(store))
+
+
+@_tool
+def carrinho_adicionar(args: dict) -> dict:
+    store = Store()
+    nome = str(args.get("nome") or "").strip()
+    preco = _num(args.get("preco_total"))
+    if not nome or preco is None:
+        raise ValueError("informe 'nome' e 'preco_total' (R$ da linha inteira)")
+    if _e_prato(store, nome):
+        return {"success": False, "bloqueado": True, "error": f"{nome} é um prato: ele entra aberto, com os ingredientes e o valor de cada um, não como um item só",
+                "proximos_passos": ["chame carrinho_adicionar_prato com 'prato' e 'ingredientes' (cada um com nome, quantidade, unidade e preco_total em R$)"]}
+    try:
+        item = store.carrinho_adicionar(nome, preco, _num(args.get("quantidade"), 1.0), args.get("unidade"),
+                                        estimado=bool(args.get("preco_estimado")), origem="consultora", motivo=args.get("motivo"))
+    except OrcamentoEstourado as exc:
+        return _recusa_saldo(exc, store)
+    return _carrinho_resposta(store, adicionado={k: item[k] for k in ("id", "nome", "quantidade", "unidade", "preco_total", "estimado")})
+
+
+@_tool
+def carrinho_adicionar_prato(args: dict) -> dict:
+    store = Store()
+    nome = str(args.get("prato") or args.get("nome") or "").strip()
+    if not nome:
+        raise ValueError("informe o nome do 'prato'")
+    ingredientes = args.get("ingredientes")
+    origem = "consultora"
+    if not ingredientes:  # prato que ela já salvou: usa os ingredientes e os valores guardados
+        salvo = store.salvo_por_nome("prato", nome)
+        if salvo is None:
+            return {"success": False, "bloqueado": True,
+                    "error": f"informe os ingredientes de {nome}, cada um com quantidade e valor (preco_total em R$)",
+                    "proximos_passos": ["liste os ingredientes do prato com o valor de cada um (despensa_buscar para o que ela já tem, pesquisa ou ela mesma para o que falta)"]}
+        ingredientes, origem = salvo["ingredientes"], "salvo"
+    try:
+        grupo = store.carrinho_adicionar_prato(nome, ingredientes, estimado=bool(args.get("precos_estimados")), origem=origem)
+    except OrcamentoEstourado as exc:
+        return _recusa_saldo(exc, store)
+    extra: dict[str, Any] = {}
+    if args.get("salvar"):
+        extra["salvo_em_meus_pratos"] = store.salvo_salvar("prato", grupo["prato"], ingredientes=ingredientes, origem="consultora")["nome"]
+    resumo = store.carrinho_resumo()
+    return _carrinho_resposta(store, prato=grupo, diga_a_dona_maria=_texto_prato(grupo) + "\n" + _texto_saldo(resumo), **extra)
+
+
+@_tool
+def carrinho_remover(args: dict) -> dict:
+    store = Store()
+    if args.get("limpar"):
+        return _carrinho_resposta(store, removidos=store.carrinho_limpar())
+    if args.get("item_id") is None and not str(args.get("nome") or "").strip():
+        raise ValueError("informe 'nome' (do ingrediente ou do prato) ou 'item_id', ou 'limpar': true")
+    saiu = store.carrinho_remover(item_id=args.get("item_id"), nome=args.get("nome"))
+    return _carrinho_resposta(store, removidos=[{k: i[k] for k in ("id", "nome", "prato", "preco_total")} for i in saiu])
+
+
+@_tool
+def carrinho_montar_da_receita(args: dict) -> dict:
+    store = Store()
+    receita_id = args.get("receita_id")
+    if not receita_id:
+        raise ValueError("informe 'receita_id' (devolvido por receita_conferir_ingredientes)")
+    receita = store.obter_receita(int(receita_id))
+    if not receita:
+        raise KeyError(f"receita_id {receita_id} não encontrada")
+    # Mesma trava do prato: o que ela não consegue cozinhar (equipamento, técnica, perfil) não vai para a lista de compras.
+    aval = _avaliar_prato(store, receita["dados"].get("ingredientes") or [], receita)
+    if aval["veredito"] != "viavel":
+        return _recusa(f"carrinho bloqueado: veredito {aval['veredito']}; só entra no carrinho o que ela consegue cozinhar, "
+                       "com equipamentos, técnicas, perfil e preços resolvidos", aval)
+    res = aval["resultado"]
+    da_despensa = []
+    for linha in res["itens"]:  # o que ela já tem entra no prato com o custo, sem gastar saldo
+        if linha.get("item_id") is None or (linha.get("usa_da_despensa_base") or 0) <= 1e-9:
+            continue
+        qtd, un = _legivel_base(float(linha["usa_da_despensa_base"]), linha["unidade_base"])
+        da_despensa.append({"ingrediente": linha["ingrediente"], "quantidade": qtd, "unidade": un, "valor": linha.get("custo_uso_despensa") or 0.0})
+    if not res["compras"] and not da_despensa:
+        return _carrinho_resposta(store, receita=receita["nome"], nota="nada a comprar: ela já tem tudo na despensa")
+    try:
+        store.carrinho_montar_da_receita(int(receita["id"]), receita["nome"], res["compras"], da_despensa)
+    except OrcamentoEstourado as exc:
+        return _recusa_saldo(exc, store)
+    grupo = next(g for g in store.carrinho_pratos() if g["prato"] == receita["nome"][:80].strip())
+    resumo = store.carrinho_resumo()
+    return _carrinho_resposta(store, receita=receita["nome"], prato=grupo, diga_a_dona_maria=_texto_prato(grupo) + "\n" + _texto_saldo(resumo))
+
+
+@_tool
+def salvos_salvar(args: dict) -> dict:
+    store = Store()
+    tipo = str(args.get("tipo") or "").strip().lower()
+    tipo = "prato" if tipo.startswith("prat") else "ingrediente" if tipo.startswith("ingr") else tipo
+    if tipo not in ("prato", "ingrediente"):
+        raise ValueError("'tipo' precisa ser 'prato' ou 'ingrediente'")
+    nome = str(args.get("nome") or "").strip()
+    if not nome:
+        raise ValueError("informe o 'nome'")
+    if tipo == "prato":
+        if args.get("ingredientes"):
+            salvo = store.salvo_salvar("prato", nome, ingredientes=args["ingredientes"], origem="consultora")
+        else:  # sem lista: guarda o prato que já está no carrinho, com os ingredientes e valores de lá
+            salvo = store.salvar_do_carrinho(prato=nome, origem="consultora")
+    elif args.get("preco_total") is not None:
+        salvo = store.salvo_salvar("ingrediente", nome, preco_total=_num(args.get("preco_total")), quantidade=_num(args.get("quantidade"), 1.0),
+                                   unidade=args.get("unidade"), origem="consultora")
+    else:
+        salvo = store.salvar_do_carrinho(nome=nome, origem="consultora")
+    detalhe = f"{len(salvo['ingredientes'])} ingredientes, " if tipo == "prato" else ""
+    return {"success": True, "salvo": {"tipo": tipo, "nome": salvo["nome"], "valor": salvo["preco_total"], "ingredientes": salvo["ingredientes"]},
+            "diga_a_dona_maria": f"Salvei o {tipo} {salvo['nome']} ({detalhe}{costing.brl(salvo['preco_total'])}) em Meus pratos e ingredientes.",
+            "salvos": _salvos_resumo(store)}
+
+
+# ----------------------------------------------------------------------------- analytics (pratos mais vendidos)
+def _contexto_mais_vendidos(r: dict[str, Any], local: str) -> str:
+    """De onde vêm os números, para a frase que a consultora repete."""
+    if not local:
+        return "só o país: a loja ainda não tem localização em Meu negócio"
+    if r["escopo"] == "prioridade":
+        return f"prioridade para {local}"
+    nivel = next((e for e in r["escopos_disponiveis"] if e["escopo"] == r["escopo"]), None)
+    return f"{nivel['rotulo']}: {nivel['onde']}" if nivel else r["escopo"]
+
+
+@_tool
+def analytics_consultar(args: dict) -> dict:
+    store = Store()
+    negocio = store.negocio()
+    r = analytics.consultar(negocio, str(args.get("escopo") or "prioridade"), int(_num(args.get("limite"), 8) or 8), args.get("categoria"))
+    ranking = []
+    for m in r["ranking"]:
+        item = {"posicao": m["posicao"], "prato": m["prato"], "categoria": m["categoria"], "preco_medio": m["preco_medio"],
+                "faixa": m["faixa"], "ingredientes": m["ingredientes"]}
+        if "onde" in m:
+            item["prioridade"] = m["prioridade"]
+            item["onde"] = [f"{o['escopo']} #{o['posicao']}" for o in m["onde"]]
+        else:
+            item["indice_de_vendas"] = m["indice"]
+        ranking.append(item)
+    local = negocio_mod.descrever_local(negocio)
+    resposta: dict[str, Any] = {
+        "success": True, "escopo": r["escopo"], "local_da_loja": local or "não informado (Meu negócio)",
+        "escopos_com_dados": [f"{e['rotulo']}: {e['onde']}" for e in r["escopos_disponiveis"]], "ranking": ranking, "aviso": r["aviso"],
+        "como_usar": ("Copie 'diga_a_dona_maria' (ele já avisa que é a base de exemplo) e pergunte qual prato ela prefere. Os primeiros são os da zona "
+                      "e da cidade da loja. Para o prato que ela escolher, detalhe os ingredientes e o valor de cada um (carrinho_adicionar_prato)."),
+    }
+    if r.get("mensagem"):
+        resposta["mensagem"] = r["mensagem"]
+    if ranking:
+        lista = "; ".join(f"{m['posicao']}) {m['prato']} (~{costing.brl(m['preco_medio'])})" for m in ranking[:5])
+        resposta["diga_a_dona_maria"] = (f"Mais vendidos ({_contexto_mais_vendidos(r, local)}; base de exemplo, dados ilustrativos, "
+                                         f"não são vendas reais): {lista}.")
+    return resposta
+
+
 # ----------------------------------------------------------------------------- schemas (formato OpenAI function)
 _ING_SCHEMA = {
     "type": "array",
@@ -894,12 +1205,12 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "perfil_cozinha_salvar": {
         "name": "perfil_cozinha_salvar",
-        "description": "Salva respostas da Dona Maria sobre a cozinha dela. 'equipamentos' aceita chaves como fogao_bocas (número), forno, panela_pressao, air_fryer, liquidificador, batedeira, micro_ondas, freezer (true/false). 'tecnicas' é um dicionário técnica→'sim'/'nao'/'aprendendo'. 'restricoes' aceita espaco_geladeira, tempo_por_cozinhada_min, gas, energia e outras. Faz merge com o que já existe.",
+        "description": "Salva SÓ o que a Dona Maria disse sobre a cozinha dela. A tool confere cada item com as falas dela e recusa (campo 'recusados') o que ela não falou, mesmo que pareça óbvio: se ela não falou, não envie o item, pergunte. Nunca complete o perfil por conta própria. 'equipamentos': nome do equipamento → número (bocas do fogão) ou true/false. 'tecnicas': nome da técnica → 'sim', 'nao' ou 'aprendendo'. 'restricoes': espaco_geladeira, tempo_por_cozinhada_min (em minutos), gas, energia e outras. Faz merge com o que já existe.",
         "parameters": {"type": "object", "properties": {
-            "equipamentos": {"type": "object", "description": "ex.: {\"fogao_bocas\": 4, \"forno\": true, \"panela_pressao\": true, \"air_fryer\": false, \"liquidificador\": true}", "additionalProperties": True},
-            "tecnicas": {"type": "object", "description": "ex.: {\"massa fresca\": \"nao\", \"molho branco\": \"sim\", \"ponto de carne\": \"aprendendo\"}", "additionalProperties": True},
-            "restricoes": {"type": "object", "description": "ex.: {\"espaco_geladeira\": \"pouco\", \"tempo_por_cozinhada_min\": 120, \"gas\": \"botijão ok\", \"energia\": \"estável\"}", "additionalProperties": True},
-            "observacoes": {"type": "string", "description": "Qualquer observação livre relevante"},
+            "equipamentos": {"type": "object", "description": "só equipamentos que ela citou: nome → número ou true/false", "additionalProperties": True},
+            "tecnicas": {"type": "object", "description": "só técnicas que ela citou: nome → 'sim', 'nao' ou 'aprendendo'", "additionalProperties": True},
+            "restricoes": {"type": "object", "description": "só restrições que ela contou: espaco_geladeira, tempo_por_cozinhada_min, gas, energia...", "additionalProperties": True},
+            "observacoes": {"type": "string", "description": "Observação livre, com as palavras dela (a tool confere)"},
         }},
     },
     "receita_conferir_ingredientes": {
@@ -959,6 +1270,78 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "description": "Situação atual: pratos aceitos no cardápio (com preço, lucro por porção e o estoque reservado para cada um), pratos em análise, pratos removidos, estoque reservado por ingrediente, receitas conferidas, orçamento restante e resumo do perfil da cozinha. Use para retomar uma conversa ou fechar a sessão.",
         "parameters": {"type": "object", "properties": {}},
     },
+    "carrinho_consultar": {
+        "name": "carrinho_consultar",
+        "description": "Mostra o carrinho de compras da Dona Maria (ingredientes avulsos e PRATOS abertos, cada um com os ingredientes e o valor de cada um), o orçamento, quanto já está no carrinho, o SALDO que sobra, o perfil do negócio dela e o que ela salvou em 'Meus pratos e ingredientes'. Use para sugerir pratos e ingredientes e para avisar o saldo. Depois de qualquer mudança no carrinho, copie a ela o campo 'diga_a_dona_maria'.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "carrinho_adicionar": {
+        "name": "carrinho_adicionar",
+        "description": "Põe UM INGREDIENTE avulso no carrinho quando ela pedir ou aceitar. Só para ingrediente: prato não entra assim (a tool recusa), use carrinho_adicionar_prato. Recusa (bloqueado=true) se o preço não couber no saldo. O preço é o da linha inteira, em R$, e vem dela ou de uma pesquisa; marque preco_estimado=true quando for estimativa.",
+        "parameters": {"type": "object", "properties": {
+            "nome": {"type": "string", "description": "Nome do ingrediente"},
+            "preco_total": {"type": "number", "description": "Preço da linha inteira em R$ (quantidade × preço unitário)"},
+            "quantidade": {"type": "number", "description": "Quantidade (padrão 1)"},
+            "unidade": {"type": "string", "description": "kg, g, L, ml, un, maço..."},
+            "preco_estimado": {"type": "boolean", "description": "true se o preço é estimativa e não o que ela informou"},
+            "motivo": {"type": "string", "description": "Opcional: para qual prato"},
+        }, "required": ["nome", "preco_total"]},
+    },
+    "carrinho_adicionar_prato": {
+        "name": "carrinho_adicionar_prato",
+        "description": "Põe um PRATO no carrinho, sempre aberto: todos os ingredientes, cada um com quantidade e valor em R$ (preco_total), mais o total do prato. Nunca ponha um prato como item único com preço fechado. Sem 'ingredientes', usa o prato que ela salvou com esse nome. Ingrediente que ela já tem na despensa: ja_tem=true (mostra o valor e não gasta saldo). Recusa (bloqueado=true) se o que ela vai comprar não couber no saldo. salvar=true também guarda o prato em 'Meus pratos'.",
+        "parameters": {"type": "object", "properties": {
+            "prato": {"type": "string", "description": "Nome do prato"},
+            "ingredientes": {"type": "array", "description": "Ingredientes do prato, cada um com o valor", "items": {"type": "object", "properties": {
+                "nome": {"type": "string"},
+                "quantidade": {"type": "number"},
+                "unidade": {"type": "string", "description": "kg, g, L, ml, un..."},
+                "preco_total": {"type": "number", "description": "Valor deste ingrediente em R$ (quantidade × preço unitário)"},
+                "ja_tem": {"type": "boolean", "description": "true se ela já tem na despensa"},
+            }, "required": ["nome", "preco_total"]}},
+            "precos_estimados": {"type": "boolean", "description": "true se os valores são estimativa e não o que ela informou"},
+            "salvar": {"type": "boolean", "description": "true para guardar também em Meus pratos"},
+        }, "required": ["prato"]},
+    },
+    "carrinho_remover": {
+        "name": "carrinho_remover",
+        "description": "Tira do carrinho um ingrediente ou um PRATO inteiro (pelo nome ou item_id) quando ela pedir, ou esvazia tudo com limpar=true. Devolve o carrinho e o saldo atualizados.",
+        "parameters": {"type": "object", "properties": {
+            "nome": {"type": "string", "description": "Nome do ingrediente ou do prato como está no carrinho"},
+            "item_id": {"type": "integer", "description": "id do item (de carrinho_consultar)"},
+            "limpar": {"type": "boolean", "description": "true para esvaziar o carrinho inteiro"},
+        }},
+    },
+    "carrinho_montar_da_receita": {
+        "name": "carrinho_montar_da_receita",
+        "description": "Põe no carrinho o prato de uma receita já conferida (receita_id de receita_conferir_ingredientes), aberto: o que ela compra, com os preços da própria conferência, e o que já tem na despensa, com o custo e sem gastar saldo. Só funciona com receita 'viavel' (equipamentos, técnicas e perfil confirmados) e dentro do saldo; senão devolve bloqueado=true com os motivos. Repetir não duplica. Quando o prato for aceito em cardapio_registrar, os itens saem do carrinho e viram compras comprometidas.",
+        "parameters": {"type": "object", "properties": {
+            "receita_id": {"type": "integer", "description": "id devolvido por receita_conferir_ingredientes"},
+        }, "required": ["receita_id"]},
+    },
+    "salvos_salvar": {
+        "name": "salvos_salvar",
+        "description": "Guarda em 'Meus pratos e ingredientes' um PRATO (com os ingredientes e o valor de cada um) ou um INGREDIENTE avulso, para ela usar de novo, quando ela pedir para salvar. Sem 'ingredientes' (prato) ou sem 'preco_total' (ingrediente), guarda o que já está no carrinho com esse nome. Mesmo nome atualiza.",
+        "parameters": {"type": "object", "properties": {
+            "tipo": {"type": "string", "enum": ["prato", "ingrediente"]},
+            "nome": {"type": "string", "description": "Nome do prato ou do ingrediente"},
+            "ingredientes": {"type": "array", "description": "Só prato: ingredientes com o valor de cada um", "items": {"type": "object", "properties": {
+                "nome": {"type": "string"}, "quantidade": {"type": "number"}, "unidade": {"type": "string"}, "preco_total": {"type": "number"}, "ja_tem": {"type": "boolean"},
+            }, "required": ["nome", "preco_total"]}},
+            "preco_total": {"type": "number", "description": "Só ingrediente: preço da linha em R$"},
+            "quantidade": {"type": "number", "description": "Só ingrediente: quantidade (padrão 1)"},
+            "unidade": {"type": "string", "description": "Só ingrediente: kg, g, L, ml, un..."},
+        }, "required": ["tipo", "nome"]},
+    },
+    "analytics_consultar": {
+        "name": "analytics_consultar",
+        "description": "Pratos mais vendidos, com preço médio e ingredientes típicos, da base de conhecimento (dados de EXEMPLO, não são vendas reais). Por padrão vem priorizado pelo lugar da loja (zona, cidade, estado, região, país: o mais local pesa mais). Use para sugerir pratos antes de montar o carrinho e diga que é a base de exemplo.",
+        "parameters": {"type": "object", "properties": {
+            "escopo": {"type": "string", "enum": ["prioridade", "zona", "cidade", "estado", "regiao", "pais"], "description": "prioridade (padrão) junta todos os níveis; os outros mostram só aquele nível"},
+            "limite": {"type": "integer", "description": "Quantos pratos (padrão 8)"},
+            "categoria": {"type": "string", "description": "Opcional: prato do dia, marmita, lanche, salgado, pizza, massas, sobremesa, peixes, saudável, japonesa"},
+        }},
+    },
 }
 
 HANDLERS: dict[str, Callable[..., str]] = {
@@ -973,4 +1356,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "cardapio_registrar": cardapio_registrar,
     "cardapio_remover": cardapio_remover,
     "cardapio_consultar": cardapio_consultar,
+    "carrinho_consultar": carrinho_consultar,
+    "carrinho_adicionar": carrinho_adicionar,
+    "carrinho_adicionar_prato": carrinho_adicionar_prato,
+    "carrinho_remover": carrinho_remover,
+    "carrinho_montar_da_receita": carrinho_montar_da_receita,
+    "salvos_salvar": salvos_salvar,
+    "analytics_consultar": analytics_consultar,
 }

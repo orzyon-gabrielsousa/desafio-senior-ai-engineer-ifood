@@ -2,8 +2,8 @@
 
 Registra no Hermes Agent, sem tocar no core:
 
-* 10 tools de domínio (toolset ``sabor_da_maria``): despensa, perfil da cozinha,
-  conferência de ingredientes, CMV, cenários de preço e cardápio.
+* 18 tools de domínio (toolset ``sabor_da_maria``): despensa, perfil da cozinha,
+  conferência de ingredientes, CMV, cenários de preço, cardápio, carrinho com saldo, itens salvos e Analytics.
 * 1 provider de ``web_extract`` (``receitas-local``): extração de receitas direto da
   página, com schema.org/Recipe, sem API externa.
 
@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import logging
 
-from . import tools
+from . import falas, painel, tools
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 
 
 def register(ctx) -> None:
@@ -32,6 +32,14 @@ def register(ctx) -> None:
             description=schema["description"].split(".")[0],
             emoji="🍲",
         )
+    # Hooks: (1) guardam o que a Dona Maria disse, para a trava de evidência do perfil (falas.py);
+    # (2) levam o carrinho, o saldo e o perfil do negócio a todo turno (painel.py).
+    for hook, callback in (("pre_llm_call", falas.ao_iniciar_turno), ("pre_llm_call", painel.ao_iniciar_turno),
+                           ("post_tool_call", falas.apos_tool)):
+        try:
+            ctx.register_hook(hook, callback)
+        except Exception as exc:  # noqa: BLE001 - sem o hook, perfil_cozinha_salvar recusa por não ter a fala dela
+            logger.warning("sabor_da_maria: hook %s não registrado: %s", hook, exc)
     try:
         from .extract import make_provider
 
