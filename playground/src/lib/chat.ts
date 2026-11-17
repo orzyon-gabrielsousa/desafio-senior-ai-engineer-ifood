@@ -8,6 +8,7 @@ export type TurnMessage = {
 
 type StreamHandlers = {
   messages: TurnMessage[];
+  cadastroEnviado?: "negocio" | "cozinha";
   sessionId: string | null;
   signal: AbortSignal;
   onSession: (sessionId: string) => void;
@@ -50,7 +51,11 @@ export async function streamTurn(handlers: StreamHandlers): Promise<void> {
   };
   if (handlers.sessionId) headers["X-Hermes-Session-Id"] = handlers.sessionId;
 
-  const outgoing = handlers.sessionId ? handlers.messages.slice(-1) : handlers.messages;
+  const history = handlers.sessionId ? handlers.messages.slice(-1) : handlers.messages;
+  const cadastro = handlers.cadastroEnviado ? `; salvou ${handlers.cadastroEnviado}` : "";
+  const outgoing = history.map((message, index) => index === history.length - 1 && message.role === "user"
+    ? { ...message, content: `${message.content}\n\n[painel da tela: cadastro guiado no chat${cadastro}]` }
+    : message);
   const response = await fetch("/hermes/v1/chat/completions", {
     method: "POST",
     headers,

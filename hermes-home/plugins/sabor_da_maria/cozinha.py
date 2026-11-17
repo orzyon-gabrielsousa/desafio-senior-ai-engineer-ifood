@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from . import costing
+from . import negocio as negocio_mod
 from .units import norm_text
 
 logger = logging.getLogger(__name__)
@@ -323,13 +324,13 @@ def _equipamentos_da_tela(bruto: Any) -> dict[str, Any]:
     if bruto in (None, ""):
         return {}
     if not isinstance(bruto, dict):
-        raise ValueError("'equipamentos' precisa ser um objeto {id: true/false}")
+        raise ValueError("'equipamentos' precisa ser um objeto {id: true/false/null}")
     limpo: dict[str, Any] = {}
     for item_id, valor in bruto.items():
         item = POR_ID.get(str(item_id))
         if item is None or item.grupo == HABILIDADE:
             raise ValueError(f"'{item_id}' não está na lista de equipamentos e utensílios")
-        if isinstance(valor, bool):
+        if valor is None or isinstance(valor, bool):
             limpo[item.id] = valor
         elif item.id == "fogao" and isinstance(valor, int) and valor in BOCAS:
             limpo[item.id] = valor
@@ -390,8 +391,8 @@ def _remover_da_tela(bruto: Any) -> list[dict[str, str]]:
 
 
 def normalizar(dados: Any) -> dict[str, Any]:
-    """Valida o que veio da tela. Só o que vier é alterado; ``None`` volta o item a "não respondi" (só habilidade e rotina:
-    equipamento é sim ou não). ``remover`` apaga o que a conversa gravou fora do catálogo. Levanta ``ValueError`` com
+    """Valida o que veio da tela. Só o que vier é alterado; ``None`` volta o item a "não respondi".
+    ``remover`` apaga o que a conversa gravou fora do catálogo. Levanta ``ValueError`` com
     mensagem para a pessoa."""
     if not isinstance(dados, dict):
         raise ValueError("a cozinha precisa ser um objeto")
@@ -409,7 +410,8 @@ def aplicar(perfil: dict[str, Any], limpo: dict[str, Any]) -> dict[str, Any]:
     for item_id, valor in limpo["equipamentos"].items():
         for chave in _chaves_do(item_id, novo["equipamentos"]):
             novo["equipamentos"].pop(chave)
-        novo["equipamentos"][item_id] = valor
+        if valor is not None:
+            novo["equipamentos"][item_id] = valor
     for item_id, valor in limpo["habilidades"].items():
         for chave in _chaves_do(item_id, novo["tecnicas"]):
             novo["tecnicas"].pop(chave)
@@ -452,17 +454,40 @@ def outros(perfil: dict[str, Any]) -> list[dict[str, str]]:
     return saida
 
 
+def blocos_de_perguntas(pendencias: list[dict[str, str]]) -> list[tuple[str, str]]:
+    """(título, perguntas) de cada grupo da cozinha que ainda falta: equipamentos e utensílios, técnicas, restrições (rotina)."""
+    por_grupo = {g: [p["pergunta"] for p in pendencias if p["grupo"] == g] for g in ("equipamentos", "tecnicas", "restricoes")}
+    return [(titulo, " ".join(por_grupo[g])) for g, titulo in (("equipamentos", "Equipamentos e utensílios"), ("tecnicas", "Técnicas que você domina"),
+                                                              ("restricoes", "Rotina da cozinha")) if por_grupo[g]]
+
+
 def perguntas_da_cozinha(pendencias: list[dict[str, str]]) -> str:
     """As perguntas da elicitação do desafio (equipamentos e utensílios, técnicas, restrições), prontas para a consultora copiar
     na primeira resposta. Só entra o que ainda falta: o que ela marcou em Minha cozinha ou já contou não se pergunta de novo."""
-    por_grupo = {g: [p["pergunta"] for p in pendencias if p["grupo"] == g] for g in ("equipamentos", "tecnicas", "restricoes")}
-    blocos = [("Equipamentos e utensílios", por_grupo["equipamentos"]), ("Técnicas que você domina", por_grupo["tecnicas"]),
-              ("Rotina da cozinha", por_grupo["restricoes"])]
-    linhas = [f"{n}. **{titulo}:** {' '.join(perguntas)}" for n, (titulo, perguntas) in enumerate([b for b in blocos if b[1]], 1)]
-    if not linhas:
+    return perguntas_iniciais([], pendencias)
+
+
+def perguntas_iniciais(pendencias_negocio: list[dict[str, str]], pendencias_cozinha: list[dict[str, str]]) -> str:
+    """O texto que a consultora copia na primeira resposta: o negócio (onde fica a loja, tipo de negócio e de alimentação) e a cozinha
+    (equipamentos e utensílios, técnicas, restrições). Só entra o que ainda falta; sem nada faltando, vazio."""
+    negocio_ = negocio_mod.blocos_de_perguntas(pendencias_negocio)
+    cozinha_ = blocos_de_perguntas(pendencias_cozinha)
+    if not negocio_ and not cozinha_:
         return ""
-    return ("Antes de escolhermos um prato, preciso saber se a sua cozinha dá conta. Me conta:\n" + "\n".join(linhas)
-            + "\nPode responder tudo de uma vez, do seu jeito. Se preferir, marque em **Minha cozinha** (menu): o que você contar aqui aparece lá.")
+    sobre = ("o seu negócio e a sua cozinha" if negocio_ and cozinha_ else "o seu negócio" if negocio_ else "a sua cozinha")
+    abertura = ("Antes de escolhermos um prato, preciso conhecer " + sobre + ". Me conta:" if negocio_
+                else "Antes de escolhermos um prato, preciso saber se a sua cozinha dá conta. Me conta:")
+    linhas: list[str] = []
+    numero = 1
+    for secao, blocos in (("Sobre o negócio", negocio_), ("Sobre a cozinha", cozinha_)):
+        if negocio_ and blocos:
+            linhas.append(f"**{secao}**")
+        for titulo, perguntas in blocos:
+            linhas.append(f"{numero}. **{titulo}:** {perguntas}")
+            numero += 1
+    onde = "**Meu negócio** e **Minha cozinha**" if negocio_ and cozinha_ else "**Meu negócio**" if negocio_ else "**Minha cozinha**"
+    return (abertura + "\n" + "\n".join(linhas)
+            + f"\nPode responder tudo de uma vez, do seu jeito. Se preferir, marque em {onde} (menu): o que você contar aqui aparece lá.")
 
 
 # ----------------------------------------------------------------------------- as fichas (prompts/base-de-conhecimento)
@@ -765,15 +790,51 @@ def _mensagens(ficha: Optional[FichaPrato], prato: Optional[str], falta: list[di
     return msgs
 
 
+# ----------------------------------------------------------------------------- os pratos que a cozinha dela faz (Minha cozinha)
+_ORDEM_DO_STATUS = {"ok": 0, "atencao": 1, "confirmar": 2, "nao_da": 3}
+
+
+def _requisito(equip: dict[str, Any], grupo: Grupo) -> dict[str, str]:
+    estados = [estado_equipamento(equip, i) for i in grupo]
+    tem = next((POR_ID[i].rotulo for i, e in zip(grupo, estados) if e in ("sim", "parcial")), "")
+    estado = "ok" if tem else "falta" if all(e == "nao" for e in estados) else "confirmar"
+    return {"nome": _ou(grupo), "estado": estado, "com": tem}
+
+
+def pratos_da_cozinha(perfil: dict[str, Any], categorias_da_loja: Iterable[str] = ()) -> dict[str, Any]:
+    """Cada prato da base com o que ele precisa (equipamentos e utensílios: tem, falta ou ainda não respondeu) e as habilidades dela,
+    agrupados por categoria. É o "se ela possui os utensílios, os equipamentos e as habilidades para cada prato" da tela Minha cozinha.
+    As categorias do tipo de alimentação dela vêm primeiro; em cada uma, o que dá para fazer vem antes."""
+    equip, tec = perfil.get("equipamentos") or {}, perfil.get("tecnicas") or {}
+    da_loja = set(categorias_da_loja)
+    por_categoria: dict[str, list[dict[str, Any]]] = {}
+    resumo = {"total": 0, "ok": 0, "atencao": 0, "confirmar": 0, "nao_da": 0}
+    for ficha in carregar().pratos.values():
+        c = conferir(ficha.nome, [], perfil)
+        habilidades = [{"nome": POR_ID[h].nome, "nivel": {"sim": "sim", "parcial": "aprendendo", "nao": "nao"}.get(estado_habilidade(tec, h) or "")}
+                       for h in ficha.habilidades]
+        por_categoria.setdefault(ficha.categoria, []).append({
+            "prato": ficha.nome, "status": c["status"], "precisa": [_requisito(equip, g) for g in ficha.precisa], "habilidades": habilidades,
+            "mensagem": c["mensagens"][0] if c["mensagens"] else "", "custo_tipico": ficha.custo_tipico, "observacao": ficha.observacao})
+        resumo["total"] += 1
+        resumo[c["status"]] += 1
+    categorias = [{"nome": nome, "da_loja": nome in da_loja, "pratos": sorted(pratos, key=lambda p: _ORDEM_DO_STATUS[p["status"]])}
+                  for nome, pratos in por_categoria.items()]
+    categorias.sort(key=lambda c: not c["da_loja"])
+    return {"resumo": resumo, "categorias": categorias}
+
+
 # ----------------------------------------------------------------------------- uso no Analytics e no carrinho
-def anotar_ranking(ranking: list[dict[str, Any]], perfil: dict[str, Any]) -> list[dict[str, Any]]:
+def anotar_ranking(ranking: list[dict[str, Any]], perfil: dict[str, Any], *,
+                   perfil_precificacao: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """Acrescenta a cada prato do Analytics a conferência com a cozinha dela e o quanto cobrar (``preco``)."""
     for item in ranking:
         item["cozinha"] = conferir(item["prato"], [], perfil)
         ficha = ficha_do_prato(item["prato"])
         item["preco"] = None
         if ficha:
-            item["preco"] = {**costing.quanto_cobrar(ficha.custo_tipico, item.get("preco_medio")), "custo_exemplo": True, "aviso": AVISO_CUSTO}
+            item["preco"] = {**costing.quanto_cobrar(ficha.custo_tipico, item.get("preco_medio"), perfil=perfil_precificacao),
+                            "custo_exemplo": True, "aviso": AVISO_CUSTO}
     return ranking
 
 

@@ -11,15 +11,24 @@
 # Os dois motores de inferência respondem pelo alias de rede "inference"; o Hermes
 # aponta para http://inference:8000/v1. Escolha o motor com COMPOSE_PROFILES no .env
 # (padrão: llamacpp). Nunca suba os dois ao mesmo tempo (uma GPU, mesma porta).
+#
+# Ciclo de vida: nada aqui sobe com o sistema. O Docker sobe no boot e religa todo container com
+# política always/unless-stopped; por isso todo serviço tem `restart: "no"`. A stack vive só enquanto
+# o `make run` estiver rodando em primeiro plano, e Ctrl+C no terminal derruba tudo. Consequência: se
+# um serviço cair (já vimos "CUDA error: the launch timed out" na inferência), nada o religa sozinho;
+# Ctrl+C e `make run` de novo.
 # =============================================================================
 name: sabor-da-maria
 
 services:
   inference-llamacpp:
     profiles: ["llamacpp"]
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda13@sha256:18edb904ace42b3aeaac25e5326a4afc4c789cce232f1159a03fc41847d33cf0
     container_name: sabor-inference
-    restart: unless-stopped
+    restart: "no"
+    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    entrypoint: ["/usr/bin/python3", "/opt/inference/llama_cache.py"]
+    stop_grace_period: 60s
     networks:
       default:
         aliases: [inference]
@@ -29,6 +38,14 @@ services:
       - "127.0.0.1:${INFERENCE_HOST_PORT:-8010}:8000"
     volumes:
       - ./models:/models:ro
+      - ./inference/llamacpp/llama_cache.py:/opt/inference/llama_cache.py:ro
+      - type: bind
+        source: ./database-internals/kv
+        target: /database-internals/kv
+        bind:
+          create_host_path: false
+    environment:
+      LLAMA_KV_SSD_INTERVAL: "${LLAMA_KV_SSD_INTERVAL:-30}"
     deploy:
       resources:
         reservations:
@@ -47,7 +64,6 @@ services:
     command: >
       --model /models/${LLAMA_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}
       --alias ${MODEL_NAME:-qwen3-8b}
-      --host 0.0.0.0 --port 8000
       --ctx-size ${LLAMA_CTX:-65536}
       --rope-scaling yarn --rope-scale ${LLAMA_ROPE_SCALE:-2} --yarn-orig-ctx 32768
       --n-gpu-layers 999
@@ -70,7 +86,7 @@ services:
     profiles: ["max"]
     image: modular/max-nvidia-full:${MAX_VERSION:-26.7.0}
     container_name: sabor-inference-max
-    restart: unless-stopped
+    restart: "no"
     networks:
       default:
         aliases: [inference]
@@ -104,10 +120,27 @@ services:
       retries: 60
       start_period: 180s
 
+  embeddings:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
+    restart: "no"
+    volumes:
+      - ./models:/models:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    # Sem pesos locais, a consultora continua recuperando memória por texto.
+    # Nada é baixado no `make run` para habilitar os embeddings.
+    command:
+      - |
+        model=/models/Qwen3-Embedding-0.6B-Q8_0.gguf
+        while [ ! -s "$$model" ]; do sleep 5; done
+        exec /app/llama-server --model "$$model" --alias qwen3-embedding-0.6b \
+          --embedding --pooling last --n-gpu-layers 0 --ctx-size 2048 \
+          --batch-size 2048 --ubatch-size 2048 --threads 4 --parallel 1 \
+          --host 0.0.0.0 --port 8080 --no-webui
+
   searxng:
     image: searxng/searxng:latest
     container_name: sabor-searxng
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "127.0.0.1:8888:8080"
     volumes:
@@ -127,10 +160,18 @@ services:
   hermes:
     image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.23.1}
     container_name: sabor-hermes
-    restart: unless-stopped
+    restart: "no"
     depends_on:
       searxng:
-        condition: service_started
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      inference-llamacpp:
+        condition: service_healthy
+        required: false # Só o perfil selecionado no .env está ativo.
+      inference-max:
+        condition: service_healthy
+        required: false
     # Diretório de trabalho = workspace com o AGENTS.md do projeto (contexto carregado
     # pelo Hermes). `docker compose exec hermes hermes` abre a TUI já nesse diretório.
     working_dir: /opt/data/workspace
@@ -143,6 +184,7 @@ services:
       # $HERMES_HOME inteiro versionado no repositório (config, SOUL, plugin, skills, memórias);
       # o estado de runtime (state.db, sessions, logs, cache) está no .gitignore.
       - ./hermes-home:/opt/data
+      - ./database-internals:/database-internals
       # Planilha da Dona Maria (entrada do desafio), somente leitura.
       - ./data:/opt/data/sabor_da_maria/entrada:ro
       # Base de conhecimento do Analytics (pratos mais vendidos por zona, cidade, estado, região e país), somente leitura.
@@ -156,8 +198,11 @@ services:
       # Plugin sabor_da_maria.
       SABOR_DA_MARIA_XLSX: /opt/data/sabor_da_maria/entrada/despensa_dona_maria.xlsx
       SABOR_DA_MARIA_DB: /opt/data/sabor_da_maria/sabor_da_maria.db
+      SABOR_DA_MARIA_INTERNALS: /database-internals
       SABOR_DA_MARIA_ORCAMENTO: "${SABOR_DA_MARIA_ORCAMENTO:-80}"
       SABOR_DA_MARIA_BASE_CONHECIMENTO: /prompts/base-de-conhecimento
+      SABOR_DA_MARIA_EMBEDDINGS_URL: http://embeddings:8080/v1/embeddings
+      SABOR_DA_MARIA_EMBEDDINGS_MODEL: qwen3-embedding-0.6b
       # API server OpenAI-compatible (http://localhost:8642/v1/chat/completions) para um
       # frontend próprio; a chave é local e o bind é só no loopback do host.
       API_SERVER_ENABLED: "${API_SERVER_ENABLED:-true}"
@@ -168,15 +213,25 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}
     command: ["gateway", "run"]
+    healthcheck:
+      test: ["CMD", "/opt/hermes/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://hermes:8642/health', timeout=2)"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
+      start_period: 60s
 
   api:
     # Reaproveita a imagem do Hermes: é o mesmo Python em que o plugin roda e não há nada novo para baixar.
     image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.23.1}
     container_name: sabor-api
-    restart: unless-stopped
+    restart: "no"
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
     working_dir: /app
     entrypoint: ["/opt/hermes/.venv/bin/python3", "-m", "sabor_da_maria.api"]
+    # A API é o PID 1 do container, e o kernel ignora SIGTERM em PID 1 que não instalou handler: o
+    # `docker stop` esperava os 10 s e matava com SIGKILL, e o Ctrl+C do `make run` demorava por isso.
+    # SIGINT cai no KeyboardInterrupt do main(), que fecha o servidor na hora.
+    stop_signal: SIGINT
     ports:
       # Só loopback: o navegador chega aqui pelo nginx do playground (/api/); a porta serve ao `make playground-dev`.
       - "127.0.0.1:${API_HOST_PORT:-8700}:8700"
@@ -184,6 +239,7 @@ services:
       # Mesmo código e mesmo SQLite do plugin: a tela e a consultora enxergam o mesmo carrinho, sem regra duplicada.
       - ./hermes-home/plugins:/app:ro
       - ./hermes-home/sabor_da_maria:/data
+      - ./database-internals:/database-internals
       - ./data:/data/entrada:ro
       - ./prompts:/prompts:ro
     environment:
@@ -192,11 +248,13 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       SABOR_DA_MARIA_XLSX: /data/entrada/despensa_dona_maria.xlsx
       SABOR_DA_MARIA_DB: /data/sabor_da_maria.db
+      SABOR_DA_MARIA_INTERNALS: /database-internals
       SABOR_DA_MARIA_ORCAMENTO: "${SABOR_DA_MARIA_ORCAMENTO:-80}"
       SABOR_DA_MARIA_BASE_CONHECIMENTO: /prompts/base-de-conhecimento
       SABOR_DA_MARIA_API_PORT: "8700"
     healthcheck:
-      test: ["CMD", "/opt/hermes/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8700/api/saude', timeout=2)"]
+      # O nome de serviço também confirma que o container está na rede do Compose.
+      test: ["CMD", "/opt/hermes/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://api:8700/api/saude', timeout=2)"]
       interval: 15s
       timeout: 4s
       retries: 5
@@ -206,16 +264,18 @@ services:
     build: ./playground
     image: sabor-da-maria-playground
     container_name: sabor-playground
-    restart: unless-stopped
+    restart: "no"
     depends_on:
       hermes:
-        condition: service_started
+        condition: service_healthy
+      api:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${PLAYGROUND_HOST_PORT:-3000}:80"
     environment:
       API_SERVER_KEY: ${API_SERVER_KEY:-sabor-da-maria-chave-local}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1/ && wget -qO /dev/null http://127.0.0.1/api/saude && wget -qO /dev/null http://127.0.0.1/hermes/health"]
       interval: 15s
       timeout: 3s
       retries: 5

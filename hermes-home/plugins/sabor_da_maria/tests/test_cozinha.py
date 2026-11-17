@@ -22,6 +22,14 @@ COZINHA_COMPLETA = {
 }
 
 
+NEGOCIO_COMPLETO = {"tipo": "marmitaria", "alimentacao": ["marmita"], "estado": "SP", "cidade": "São Paulo", "zona": "leste"}
+
+
+def negocio_completo():
+    """O negócio (onde fica a loja, tipo de negócio e de alimentação) já respondido: sobra só a cozinha para a consultora perguntar."""
+    return Store().negocio_salvar(NEGOCIO_COMPLETO)
+
+
 def call(name, **args):
     return json.loads(tools.HANDLERS[name](args, session_id=SESSAO))
 
@@ -420,16 +428,16 @@ class AvisosNasToolsTests(StoreTestCase):
 
     def test_analytics_diz_o_que_a_cozinha_faz_e_quanto_cobrar(self):
         marcar(equipamentos={"forno": False})
-        out = call("analytics_consultar", escopo="pais", limite=5)
+        out = json.loads(tools.analytics_consultar({"escopo": "pais", "limite": 5}))
         pizza = out["ranking"][0]
         self.assertEqual((pizza["prato"], pizza["cozinha_dela"]), ("Pizza de calabresa", "nao_da"))
         self.assertIn("forno", pizza["aviso_da_cozinha"])
         qc = pizza["quanto_cobrar"]
-        self.assertEqual((qc["custo_tipico_de_exemplo"], qc["cobrar_no_minimo_sem_prejuizo"]), (16.0, 17.78))
+        self.assertEqual((qc["custo_tipico_de_exemplo"], qc["cobrar_no_minimo_sem_prejuizo"]), (16.0, 18.86))
         self.assertIn("para_sobrar_30_por_cento", qc)
-        self.assertIn("1) Pizza de calabresa (~R$ 52,00; cobrar a partir de R$ 17,78) [NÃO dá na cozinha dela: forno]", out["diga_a_dona_maria"])
+        self.assertIn("1) Pizza de calabresa (~R$ 52,00; cobrar a partir de R$ 18,86) [NÃO dá na cozinha dela: forno]", out["diga_a_dona_maria"])
         self.assertIn("base de exemplo", out["diga_a_dona_maria"])
-        self.assertIn("com o custo real dela o número muda", out["diga_a_dona_maria"])
+        self.assertIn("Com o custo real da receita o preço muda", out["diga_a_dona_maria"])
 
     def test_receita_de_prato_da_base_soma_o_que_o_modelo_esqueceu(self):
         marcar(**COZINHA_COMPLETA)
@@ -523,7 +531,9 @@ class SalvarComOModeloReal(StoreTestCase):
         self.assertIn("'tecnicas'", out["lembrete"])
         marcar(**COZINHA_COMPLETA)
         diz("Tenho liquidificador", sessao=SESSAO)
-        self.assertNotIn("lembrete", call("perfil_cozinha_salvar", equipamentos={"liquidificador": True}))  # completo: nada a lembrar
+        self.assertIn("O negócio também está incompleto", call("perfil_cozinha_salvar", equipamentos={"liquidificador": True})["lembrete"])
+        negocio_completo()
+        self.assertNotIn("lembrete", call("perfil_cozinha_salvar", equipamentos={"liquidificador": True}))  # tudo completo: nada a lembrar
 
     def test_tecnica_dita_com_as_palavras_dela_e_aceita_como_habilidade_do_catalogo(self):
         diz("Sei refogar e fazer molho béchamel, mas nunca fiz massa fresca.")
@@ -566,22 +576,34 @@ class SalvarComOModeloReal(StoreTestCase):
 class PainelDaCozinhaTests(StoreTestCase):
     def test_primeira_mensagem_manda_perguntar_ja_na_primeira_resposta(self):
         texto = painel.texto_do_painel(primeira_mensagem=True)
-        self.assertIn("COZINHA INCOMPLETA E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
+        self.assertIn("NEGÓCIO E COZINHA INCOMPLETOS E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
         self.assertIn("faça JÁ NESTA RESPOSTA as perguntas abaixo", texto)
         for pergunta in ("quantas bocas", "forno", "panela de pressão", "air fryer", "liquidificador", "molho béchamel", "ponto da carne",
-                         "geladeira", "gás", "energia", "cozinhada"):  # o que o desafio manda descobrir
+                         "geladeira", "gás", "energia", "cozinhada"):  # o que o desafio manda descobrir da cozinha
             self.assertIn(pergunta, texto)
+        for pergunta in ("país, estado e cidade", "zona da cidade", "tipo de negócio", "Tipo de alimentação que você faz"):  # e o que o negócio precisa
+            self.assertIn(pergunta, texto)
+        self.assertIn("negocio_salvar", texto)
         self.assertIn("ainda não marcou nada em Minha cozinha", texto)
+
+    def test_so_a_cozinha_incompleta_nao_pergunta_do_negocio(self):
+        negocio_completo()
+        texto = painel.texto_do_painel(primeira_mensagem=True)
+        self.assertIn("COZINHA INCOMPLETA E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
+        self.assertNotIn("Sobre o negócio", texto)
+        self.assertNotIn("negocio_salvar", texto)
+        self.assertIn("Antes de escolhermos um prato, preciso saber se a sua cozinha dá conta.", texto)
 
     def test_hook_usa_o_is_first_turn_do_hermes(self):
         primeiro = painel.ao_iniciar_turno(session_id="s", user_message="oi", conversation_history=[], is_first_turn=True)["context"]
         self.assertIn("PRIMEIRA MENSAGEM DA CONVERSA", primeiro)
         depois = painel.ao_iniciar_turno(session_id="s", user_message="oi", conversation_history=[], is_first_turn=False)["context"]
         self.assertNotIn("PRIMEIRA MENSAGEM", depois)
-        self.assertIn("COZINHA INCOMPLETA (10 perguntas sem resposta)", depois)
+        self.assertIn("NEGÓCIO E COZINHA INCOMPLETOS (13 perguntas sem resposta)", depois)
         self.assertIn("releia a última mensagem dela", depois)  # o 8B esquece que ela já respondeu: manda reler antes de perguntar
 
     def test_so_pergunta_o_que_ainda_falta(self):
+        negocio_completo()
         marcar(equipamentos={"fogao": 4, "forno": True, "panela_pressao": True, "air_fryer": False, "liquidificador": True})
         texto = painel.texto_do_painel(primeira_mensagem=True)
         self.assertNotIn("quantas bocas", texto)
@@ -592,11 +614,12 @@ class PainelDaCozinhaTests(StoreTestCase):
 
     def test_cozinha_completa_nao_pergunta_de_novo(self):
         marcar(**COZINHA_COMPLETA)
+        negocio_completo()
         for primeira in (True, False):
             texto = painel.texto_do_painel(primeira_mensagem=primeira)
             self.assertIn("Cozinha completa: não pergunte de novo", texto)
-            self.assertNotIn("PERGUNTAS DA COZINHA", texto)
-            self.assertNotIn("COZINHA INCOMPLETA", texto)
+            self.assertNotIn("PERGUNTAS PARA FAZER", texto)
+            self.assertNotIn("INCOMPLET", texto)
 
     def test_o_que_foi_salvo_aparece_para_a_consultora(self):
         marcar(**COZINHA_COMPLETA)
@@ -607,10 +630,12 @@ class PainelDaCozinhaTests(StoreTestCase):
         self.assertIn("NÃO SABE: fazer sushi e preparar peixe cru", texto)
         self.assertIn("rotina: espaço na geladeira médio, tempo por cozinhada até 2 horas, gás botijão, energia elétrica estável", texto)
 
-    def test_mais_vendidos_marca_o_que_a_cozinha_nao_faz(self):
+    def test_pesquisa_leva_restricao_real_da_cozinha_sem_preco_ilustrativo(self):
         marcar(**COZINHA_COMPLETA)
         marcar(equipamentos={"forno": False})
-        self.assertIn("1) Pizza de calabresa (~R$ 52,00) [NÃO dá na cozinha dela: forno]", painel.texto_do_painel())
+        texto = painel.texto_do_painel(mensagem="Pesquisa receitas de pizza")
+        self.assertIn("NÃO TEM: forno", texto)
+        self.assertNotIn("R$ 52,00", texto)
 
     def test_as_perguntas_do_painel_nao_viram_fala_dela(self):
         from sabor_da_maria import falas
@@ -658,12 +683,13 @@ class ApiDaCozinhaTests(StoreTestCase):
         st, r = api.tratar("GET", "/api/analytics?escopo=pais&limite=3")
         self.assertEqual(st, 200)
         pizza = r["ranking"][0]
-        self.assertEqual((pizza["cozinha"]["status"], pizza["preco"]["preco_minimo"]), ("nao_da", 17.78))
-        self.assertEqual(pizza["preco"]["mercado"]["recebe_liquido"], 46.8)
+        self.assertEqual((pizza["cozinha"]["status"], pizza["preco"]["preco_minimo"]), ("nao_da", 18.86))
+        self.assertEqual(pizza["preco"]["mercado"]["recebe_liquido"], 44.1)
 
     def test_precos_para_a_calculadora_da_tela(self):
         st, q = api.tratar("GET", "/api/precos?cmv=9,50&preco=29.40")
-        self.assertEqual((st, q["preco_minimo"], q["mercado"]["lucro"]), (200, 10.56, 16.96))
+        self.assertEqual((st, q["preco_minimo"], q["mercado"]["lucro"]), (200, 11.2, 15.43))
+        self.assertIsNone(q["mercado"]["impostos"])
         self.assertEqual(api.tratar("GET", "/api/precos?cmv=9.5")[1]["mercado"], None)
         for ruim in ("/api/precos", "/api/precos?cmv=0", "/api/precos?cmv=abc", "/api/precos?cmv=9.5&preco=x"):
             self.assertEqual(api.tratar("GET", ruim)[0], 400, ruim)

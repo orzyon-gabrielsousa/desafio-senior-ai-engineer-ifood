@@ -10,6 +10,7 @@ houver dúvida, em vez de assumir.
 
 from __future__ import annotations
 
+import re
 from difflib import SequenceMatcher
 
 from .units import norm_text
@@ -83,7 +84,27 @@ def canonical_query(text: str) -> str:
     return n
 
 
+def _corte_frango(texto: str) -> str | None:
+    nome = norm_text(texto)
+    if re.search(r"\b(?:coxinhas? da asa|drumettes?)\b", nome):
+        return "coxinha_da_asa"
+    if not re.search(r"\bfrango\b", nome):
+        return None
+    for corte, padrao in (("peito", r"peitos?|files?"), ("sobrecoxa", r"sobrecoxas?"),
+                          ("coxa", r"coxas?"), ("asa", r"asas?|tulipas?"), ("inteiro", r"inteiros?")):
+        if re.search(r"\b(?:" + padrao + r")\b", nome):
+            return corte
+    return None
+
+
+def cortes_incompativeis(ingrediente: str, candidato: str) -> bool:
+    corte = _corte_frango(ingrediente)
+    return corte is not None and corte != _corte_frango(candidato)
+
+
 def score(query: str, candidate: str) -> float:
+    if cortes_incompativeis(query, candidate):
+        return 0.0
     q_can = canonical_query(query)
     q_tok = tokens(q_can) | tokens(query)
     c_tok = tokens(candidate)

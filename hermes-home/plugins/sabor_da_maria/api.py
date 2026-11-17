@@ -1,4 +1,4 @@
-"""API HTTP mínima da tela: carrinho, pratos, itens salvos, perfil do negócio, Minha cozinha e Analytics.
+"""API HTTP mínima da tela: carrinho, pratos, itens salvos, perfil do negócio, Minha cozinha, Analytics e o passo a passo da consultora.
 
 Serviço pequeno, só stdlib, que usa o MESMO ``Store`` e o mesmo leitor de Analytics das tools do plugin:
 nenhuma regra é duplicada e a tela e a consultora enxergam os mesmos dados no mesmo SQLite. Quem o expõe
@@ -8,11 +8,18 @@ ao navegador é o nginx do playground (``/api/``); a porta não é publicada no 
 
 Rotas (JSON; erros voltam como ``{"erro": "..."}``):
 
-    GET    /api/saude
+    GET    /api/saude                        verifica a abertura e a carga inicial do SQLite
+    GET    /api/conversas                    cópia das conversas do playground em disco
+    PUT    /api/conversas/<id>               guarda mensagens e o identificador de sessão do Hermes
+    DELETE /api/conversas/<id>               remove a conversa da tela e do índice de busca
+    GET    /api/memoria                      contagem de conversas, arquivos e vetores em disco
     GET    /api/estado                       orçamento + carrinho + salvos + perfil do negócio + a cozinha dela + avisos do
                                              carrinho (o que a cozinha dela não faz) + opções de seleção
     GET    /api/analytics?escopo=&limite=&categoria=    pratos mais vendidos, priorizados pelo lugar da loja, cada um com
                                              o que a cozinha dela faz e quanto cobrar para lucrar depois da taxa
+    GET    /api/analytics/analises          {analises: [...]} propostas salvas pela consultora após o aceite da receita final,
+    PUT    /api/analytics/taxas             plano iFood, pagamento e alíquota efetiva sobre a venda
+                                             com cenários, recomendação e, quando registrado, o preço escolhido
     GET    /api/precos?cmv=&preco=           quanto cobrar para um custo (CMV) dado, e o que sobra no preço do mercado
     POST   /api/carrinho/itens               {nome, preco_total, quantidade?, unidade?}   ingrediente avulso
     PATCH  /api/carrinho/itens/<id>          {quantidade}
@@ -23,9 +30,13 @@ Rotas (JSON; erros voltam como ``{"erro": "..."}``):
     POST   /api/salvos                       {tipo: prato|ingrediente, nome, ingredientes? | preco_total, quantidade?, unidade?}
     POST   /api/salvos/<id>/carrinho         põe o item salvo no carrinho
     DELETE /api/salvos/<id>
-    PUT    /api/negocio                      {tipo, vende[], publico?, observacoes?, estado?, cidade?, zona?}
-    PUT    /api/cozinha                      {equipamentos?: {id: true|false}, habilidades?: {id: sim|aprendendo|nao|null},
+    PUT    /api/negocio                      {tipo?, alimentacao?: [id], estado?, cidade?, zona?}   (onde a loja fica, tipo de negócio e de alimentação)
+    PATCH  /api/negocio                      atualiza só os campos enviados pelo formulário do chat
+    PUT    /api/cozinha                      {equipamentos?: {id: true|false|null}, habilidades?: {id: sim|aprendendo|nao|null},
                                               rotina?: {chave: valor|null}, remover?: [{grupo, chave}]}   (ids do catálogo)
+    GET    /api/cozinha/pratos               cada prato da base com o que precisa, o que ela tem e as habilidades dela
+    GET    /api/atividade?ids=a,b,c          o que cada chamada de ferramenta da consultora fez (o chat junta com os passos que recebe
+                                             no streaming); sem ids, as últimas ações (?limite=30)
 
 Item que não cabe no saldo volta 409 com o ``estado`` atual; entrada inválida, 400.
 """
@@ -40,10 +51,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import analytics, costing
+from . import analytics, costing, historico, precificacao
 from . import cozinha as cozinha_mod
 from . import negocio as negocio_mod
 from .store import OrcamentoEstourado, Store
+from .tools import _pendencias_perfil
 
 logger = logging.getLogger("sabor_da_maria.api")
 
@@ -54,13 +66,27 @@ def estado(store: Optional[Store] = None) -> dict[str, Any]:
     """Tudo o que a tela precisa numa chamada só."""
     store = store or Store()
     perfil = store.perfil()
+    negocio = store.negocio()
+    pendencias_cozinha = _pendencias_perfil(perfil)
+    orcamento = store.orcamento()
+    carrinho = store.carrinho_itens()
     return {
-        "orcamento": store.carrinho_resumo(),
-        "carrinho": store.carrinho_itens(),
-        "alertas": cozinha_mod.alertas_do_carrinho(store.carrinho_itens(), perfil),
+        "geracao_dados": historico.geracao(store.db_path),
+        "orcamento": store.carrinho_resumo(orcamento=orcamento),
+        "perfil_precificacao": store.perfil_precificacao(),
+        "compras_pagas": [{"ingrediente": compra["ingrediente"], "quantidade": compra["quantidade"],
+                           "unidade": compra["unidade"], "preco_total": compra["preco_estimado"]}
+                          for compra in orcamento["compras_confirmadas"] if compra["prato_id"] is None],
+        "pratos_escolhidos": store.pratos_em_andamento(),
+        "despensa_consultada": store.despensa_consultada(),
+        "carrinho": carrinho,
+        "alertas": cozinha_mod.alertas_do_carrinho(carrinho, perfil),
         "salvos": store.salvos(),
-        "negocio": store.negocio(),
-        "cozinha": store.cozinha(),
+        "negocio": negocio,
+        "cozinha": store.cozinha(perfil),
+        "cadastro": {"negocio_pendente": bool(negocio_mod.pendencias(negocio)),
+                     "cozinha_pendente": bool(pendencias_cozinha),
+                     "cozinha_campos": ["fogao" if p["chave"] == "fogao_bocas" else p["chave"] for p in pendencias_cozinha]},
         "opcoes": {**negocio_mod.opcoes(), "cozinha": cozinha_mod.opcoes()},
     }
 
@@ -89,28 +115,84 @@ def _id(texto: str) -> int:
     return int(texto)
 
 
+def _saude() -> tuple[int, dict[str, Any]]:
+    try:
+        Store().ensure_loaded()
+    except Exception:  # noqa: BLE001 - a prontidão depende do banco e da carga inicial
+        logger.exception("não consegui preparar o banco da consultoria")
+        return 503, {"erro": "banco de dados indisponível"}
+    return 200, {"status": "ok"}
+
+
+def _conversas(metodo: str, rota: list[str], corpo: Any, store: Store) -> tuple[int, dict[str, Any]]:
+    banco = historico.Historico(historico.diretorio(store.db_path))
+    geracao = historico.geracao(store.db_path)
+    if len(rota) == 1 and metodo == "GET":
+        return 200, {"geracao_dados": geracao, "conversas": banco.recentes()}
+    if len(rota) != 2 or metodo not in ("PUT", "DELETE"):
+        return 405, {"erro": "método não permitido"}
+    id_conversa = historico.identificador(rota[1])
+    dados = _objeto(corpo)
+    if "geracao_dados" not in dados or dados["geracao_dados"] != geracao:
+        return 409, {"erro": "a geração dos dados mudou", "geracao_dados": geracao}
+    if metodo == "PUT":
+        try:
+            return 200, {"conversa": banco.salvar(id_conversa, dados.get("conversa"))}
+        except historico.ConversaExcluida:
+            return 410, {"erro": "a conversa foi excluída"}
+    sessao = banco.excluir(id_conversa)
+    if sessao:
+        from . import memoria
+
+        memoria.excluir_sessao(sessao)
+    return 200, {"ok": True}
+
+
+def _segmentos(caminho: str) -> list[str]:
+    return [unquote(p) for p in caminho.split("/") if p]
+
+
 def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str, Any]]:
     """Roteia uma requisição. Fica fora da classe HTTP para dar para testar sem abrir porta."""
     url = urlsplit(caminho)
-    partes = [unquote(p) for p in url.path.split("/") if p]
+    partes = _segmentos(url.path)
     consulta = parse_qs(url.query)
     if partes[:1] != ["api"]:
         return 404, {"erro": "rota desconhecida"}
     rota = partes[1:]
+    if rota == ["saude"] and metodo == "GET":
+        return _saude()
     try:
-        if rota == ["saude"] and metodo == "GET":
-            return 200, {"status": "ok"}
         store = Store()
+        if rota[:1] == ["conversas"]:
+            return _conversas(metodo, rota, corpo, store)
+        if rota == ["memoria"] and metodo == "GET":
+            from . import memoria
+
+            banco = historico.Historico(historico.diretorio(store.db_path))
+            return 200, {"conversas_salvas": banco.total(), **memoria.estatisticas()}
         if rota == ["estado"] and metodo == "GET":
             return 200, estado(store)
+        if rota == ["despensa", "conferir"] and metodo == "POST":
+            itens = [{"nome": item["nome"], "disponivel": item["disponivel_legivel"], "preco_pago": item["preco_total"]}
+                     for item in store.ingredientes()]
+            store.registrar_consulta_despensa()
+            return 200, {"itens": itens, "estado": estado(store)}
+        if rota == ["analytics", "analises"] and metodo == "GET":
+            return 200, precificacao.consultar(store)
+        if rota == ["analytics", "taxas"] and metodo == "PUT":
+            store.salvar_perfil_precificacao(_objeto(corpo))
+            return 200, precificacao.consultar(store)
         if rota == ["analytics"] and metodo == "GET":
             limite = int(_numero(consulta.get("limite", ["10"])[0], "limite"))
-            r = analytics.consultar(store.negocio(), consulta.get("escopo", ["prioridade"])[0], limite, consulta.get("categoria", [None])[0])
-            cozinha_mod.anotar_ranking(r["ranking"], store.perfil())
+            r = analytics.consultar(store.negocio(), consulta.get("escopo", ["prioridade"])[0], limite,
+                                    consulta.get("categoria", [None])[0])
+            cozinha_mod.anotar_ranking(r["ranking"], store.perfil(), perfil_precificacao=store.perfil_precificacao())
             return 200, r
         if rota == ["precos"] and metodo == "GET":
             preco = consulta.get("preco", [""])[0]
-            return 200, costing.quanto_cobrar(_numero(consulta.get("cmv", [""])[0], "custo do prato"), _numero(preco, "preço") if preco else None)
+            return 200, costing.quanto_cobrar(_numero(consulta.get("cmv", [""])[0], "custo do prato"),
+                                              _numero(preco, "preço") if preco else None, perfil=store.perfil_precificacao())
         if rota == ["carrinho", "itens"] and metodo == "POST":
             dados = _objeto(corpo)
             store.carrinho_adicionar(
@@ -149,10 +231,20 @@ def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str,
         if rota == ["negocio"] and metodo == "PUT":
             store.negocio_salvar(_objeto(corpo))
             return 200, estado(store)
+        if rota == ["negocio"] and metodo == "PATCH":
+            store.negocio_atualizar(_objeto(corpo), somar_alimentacao=False)
+            return 200, estado(store)
+        if rota == ["cozinha", "pratos"] and metodo == "GET":
+            return 200, cozinha_mod.pratos_da_cozinha(store.perfil(), negocio_mod.categorias_da_loja(store.negocio()))
         if rota == ["cozinha"] and metodo == "PUT":
             store.cozinha_salvar(_objeto(corpo))
             return 200, estado(store)
-        if rota and rota[0] in {"saude", "estado", "analytics", "precos", "carrinho", "salvos", "negocio", "cozinha"}:
+        if rota == ["atividade"] and metodo == "GET":
+            ids = [i.strip() for i in consulta.get("ids", [""])[0].split(",") if i.strip()]
+            if ids:
+                return 200, {"atividade": store.atividade_das_chamadas(ids)}
+            return 200, {"recentes": store.atividade_recente(int(_numero(consulta.get("limite", ["30"])[0], "limite")))}
+        if rota and rota[0] in {"saude", "estado", "despensa", "analytics", "precos", "carrinho", "salvos", "negocio", "cozinha", "atividade", "memoria"}:
             return 405, {"erro": "método não permitido"}
         return 404, {"erro": "rota desconhecida"}
     except OrcamentoEstourado as exc:
@@ -179,8 +271,22 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(corpo)
 
     def _executar(self, metodo: str) -> None:
-        tamanho = int(self.headers.get("Content-Length") or 0)
-        if tamanho > MAX_CORPO:
+        caminho = _segmentos(urlsplit(self.path).path)
+        historico_local = caminho[:2] in (["api", "conversas"], ["api", "memoria"])
+        if historico_local:
+            host = self.headers.get("Host", "").lower()
+            origem = self.headers.get("Origin")
+            if host.split(":", 1)[0] not in ("localhost", "127.0.0.1") or (origem and origem != f"http://{host}"):
+                self._responder(403, {"erro": "acesse o histórico pelo playground local"})
+                return
+        try:
+            tamanho = int(self.headers.get("Content-Length") or 0)
+            if tamanho < 0:
+                raise ValueError()
+        except ValueError:
+            self._responder(400, {"erro": "tamanho da requisição inválido"})
+            return
+        if tamanho > (historico.MAX_CORPO if caminho[:2] == ["api", "conversas"] else MAX_CORPO):
             self._responder(413, {"erro": "corpo grande demais"})
             return
         corpo: Any = None
@@ -222,8 +328,8 @@ def main() -> None:
     porta = int(os.environ.get("SABOR_DA_MARIA_API_PORT", "8700"))
     try:
         Store().ensure_loaded()  # cria o banco e carrega a planilha já na subida
-    except Exception as exc:  # noqa: BLE001 - a API sobe mesmo assim; a tool da despensa mostra o erro
-        logger.warning("não consegui carregar a planilha: %s", exc)
+    except Exception:  # noqa: BLE001 - /api/saude devolve 503 e tenta novamente
+        logger.exception("não consegui preparar o banco da consultoria na inicialização")
     servidor = criar_servidor(host, porta)
     logger.info("API do carrinho em http://%s:%s", host, porta)
     try:

@@ -5,9 +5,11 @@ type Block =
   | { type: "ul"; items: string[] }
   | { type: "ol"; items: string[] }
   | { type: "pre"; text: string }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "h"; level: number; text: string };
 
 const INLINE = /(\*\*[^*]+?\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+const HEADING = /^(#{1,6})\s+(.*)$/;
 
 function inline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -39,6 +41,20 @@ function inline(text: string, keyPrefix: string): ReactNode[] {
   return nodes;
 }
 
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "")
+    .split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|"));
+}
+
+function tableHeaders(lines: string[], index: number): string[] | undefined {
+  if (!lines[index].includes("|") || !lines[index + 1]?.includes("|")) return;
+  const headers = tableCells(lines[index]);
+  const separators = tableCells(lines[index + 1]);
+  if (headers.length === separators.length && separators.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+    return headers;
+  }
+}
+
 function parseBlocks(source: string): Block[] {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const blocks: Block[] = [];
@@ -60,7 +76,7 @@ function parseBlocks(source: string): Block[] {
       i += 1;
       continue;
     }
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+    const heading = HEADING.exec(line);
     if (heading) {
       blocks.push({ type: "h", level: heading[1].length, text: heading[2] });
       i += 1;
@@ -84,14 +100,26 @@ function parseBlocks(source: string): Block[] {
       blocks.push({ type: "ol", items });
       continue;
     }
+    const headers = tableHeaders(lines, i);
+    if (headers) {
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && !HEADING.test(lines[i]) && !lines[i].startsWith("```")) {
+        rows.push(tableCells(lines[i]));
+        i += 1;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
     const paragraph: string[] = [];
     while (
       i < lines.length &&
       lines[i].trim() &&
       !lines[i].startsWith("```") &&
-      !/^(#{1,3})\s+/.test(lines[i]) &&
+      !HEADING.test(lines[i]) &&
       !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*\d+[.)]\s+/.test(lines[i])
+      !/^\s*\d+[.)]\s+/.test(lines[i]) &&
+      !tableHeaders(lines, i)
     ) {
       paragraph.push(lines[i]);
       i += 1;
@@ -111,10 +139,28 @@ function renderBlock(block: Block, index: number): ReactNode {
     );
   }
   if (block.type === "h") {
-    const content = inline(block.text, key);
-    if (block.level <= 1) return <h2 key={key}>{content}</h2>;
-    if (block.level === 2) return <h3 key={key}>{content}</h3>;
-    return <h4 key={key}>{content}</h4>;
+    const Heading = (["h2", "h3", "h4", "h5", "h6", "h6"] as const)[block.level - 1];
+    return <Heading key={key}>{inline(block.text, key)}</Heading>;
+  }
+  if (block.type === "table") {
+    return (
+      <div className="md-table" key={key} role="region" aria-label="Tabela da conversa" tabIndex={0}>
+        <table>
+          <thead>
+            <tr>
+              {block.headers.map((cell, column) => <th key={column} scope="col">{inline(cell, `${key}-header-${column}`)}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, index) => (
+              <tr key={index}>
+                {block.headers.map((_, column) => <td key={column}>{inline(row[column] ?? "", `${key}-${index}-${column}`)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
   }
   if (block.type === "ul" || block.type === "ol") {
     const List = block.type === "ul" ? "ul" : "ol";

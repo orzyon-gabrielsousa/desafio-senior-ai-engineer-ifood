@@ -1,7 +1,39 @@
 import type { ChatMessage, Conversation, ToolTrace } from "../types";
 
 const KEY = "sabor-da-maria.playground.v1";
-const MAX_CONVERSATIONS = 30;
+const QUEUE_PREFIX = `${KEY}.pendente.`;
+const MIGRATION_KEY = `${KEY}.migrado`;
+export const HISTORY_GENERATION_KEY = "sabor-da-maria.playground.geracao";
+export const MAX_CONVERSATIONS = 30;
+
+export type HistoryChange = { kind: "put"; conversa: Conversation } | { kind: "delete"; id: string; checkpoint?: Conversation };
+
+function historyKey(generation: string | null): string {
+  return generation ? `${KEY}.${generation}` : KEY;
+}
+
+export function loadHistoryGeneration(): string | null {
+  try {
+    return localStorage.getItem(HISTORY_GENERATION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setHistoryGeneration(generation: string | null): void {
+  try {
+    const old = loadHistoryGeneration();
+    if (old === generation) return;
+    localStorage.removeItem(historyKey(old));
+    localStorage.removeItem(KEY);
+    for (const key of pendingKeys()) localStorage.removeItem(key);
+    localStorage.removeItem(MIGRATION_KEY);
+    if (generation === null) localStorage.removeItem(HISTORY_GENERATION_KEY);
+    else localStorage.setItem(HISTORY_GENERATION_KEY, generation);
+  } catch {
+    // A conversa atual continua disponível em memória.
+  }
+}
 
 function isTool(value: unknown): value is ToolTrace {
   if (!value || typeof value !== "object") return false;
@@ -19,7 +51,7 @@ function isMessage(value: unknown): value is ChatMessage {
   );
 }
 
-function asConversation(value: unknown): Conversation | null {
+export function asConversation(value: unknown): Conversation | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Partial<Conversation>;
   if (typeof item.id !== "string" || !Array.isArray(item.messages)) return null;
@@ -27,7 +59,13 @@ function asConversation(value: unknown): Conversation | null {
     id: message.id,
     role: message.role,
     content: message.content,
-    tools: Array.isArray(message.tools) ? message.tools.filter(isTool) : [],
+    webSearch: message.webSearch === true,
+    cadastroEnviado: message.cadastroEnviado === "negocio" || message.cadastroEnviado === "cozinha"
+      ? message.cadastroEnviado : undefined,
+    // Passo que estava rodando quando a página fechou foi interrompido: não fica girando para sempre.
+    tools: Array.isArray(message.tools)
+      ? message.tools.filter(isTool).map((tool) => (tool.status === "running" ? { ...tool, status: "error" as const } : tool))
+      : [],
     error: message.error === true,
     pending: false,
     at: typeof message.at === "number" ? message.at : undefined,
@@ -41,9 +79,72 @@ function asConversation(value: unknown): Conversation | null {
   };
 }
 
+export function historyChangedId(change: HistoryChange): string {
+  return change.kind === "put" ? change.conversa.id : change.id;
+}
+
+function pendingKeys(): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(QUEUE_PREFIX)) keys.push(key);
+  }
+  return keys;
+}
+
+export function loadHistoryQueue(generation: string | null): HistoryChange[] {
+  try {
+    return pendingKeys().flatMap((key) => {
+      const pending = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (pending?.generation !== generation) return [];
+      const change: Partial<HistoryChange> | null = pending.change;
+      if (change?.kind === "delete" && typeof change.id === "string") return [change] as HistoryChange[];
+      if (change?.kind !== "put") return [];
+      return asConversation(change.conversa) ? [change] as HistoryChange[] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function saveHistoryChange(generation: string | null, change: HistoryChange): void {
+  try {
+    if (loadHistoryGeneration() !== generation) return;
+    localStorage.setItem(QUEUE_PREFIX + historyChangedId(change), JSON.stringify({ generation, change }));
+  } catch {
+    // A fila ainda pode ser enviada enquanto esta aba estiver aberta.
+  }
+}
+
+export function clearHistoryChange(generation: string | null, change: HistoryChange): void {
+  try {
+    if (loadHistoryGeneration() !== generation) return;
+    const key = QUEUE_PREFIX + historyChangedId(change);
+    if (localStorage.getItem(key) === JSON.stringify({ generation, change })) localStorage.removeItem(key);
+  } catch {
+    // A repetição é idempotente quando o armazenamento voltar.
+  }
+}
+
+export function historyMigrated(generation: string | null): boolean {
+  try {
+    return localStorage.getItem(MIGRATION_KEY) === JSON.stringify(generation);
+  } catch {
+    return false;
+  }
+}
+
+export function markHistoryMigrated(generation: string | null): void {
+  try {
+    if (loadHistoryGeneration() === generation) localStorage.setItem(MIGRATION_KEY, JSON.stringify(generation));
+  } catch {
+    // Uma nova tentativa de migração usa os mesmos IDs.
+  }
+}
+
 export function loadConversations(): Conversation[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(historyKey(loadHistoryGeneration()));
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -57,16 +158,17 @@ export function loadConversations(): Conversation[] {
   }
 }
 
-export function saveConversations(conversations: Conversation[]): void {
+export function saveConversations(conversations: Conversation[], generation: string | null = loadHistoryGeneration()): void {
   try {
+    if (loadHistoryGeneration() !== generation) return;
     const stored = conversations
       .map((conversation) => ({
         ...conversation,
-        messages: conversation.messages.map((message) => ({ ...message, pending: false })),
+        messages: conversation.messages.filter((message) => !message.pending),
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, MAX_CONVERSATIONS);
-    localStorage.setItem(KEY, JSON.stringify(stored));
+    localStorage.setItem(historyKey(generation), JSON.stringify(stored));
   } catch {
     // A conversa continua na memória mesmo se o navegador recusar o armazenamento.
   }

@@ -1,12 +1,26 @@
 import json
 import unittest
 
-from sabor_da_maria import costing, tools
+from sabor_da_maria import api, costing, falas, taxas, tools
+from sabor_da_maria.store import Store
 
 from ._base import FALA_COZINHA, SESSAO, StoreTestCase, diz
 
 
 class CostingTests(unittest.TestCase):
+    def test_comissao_pagamento_impostos_e_sobra_por_porcao(self):
+        perfil = taxas.normalizar({"plano": "entrega", "imposto": 0.04})
+        aval = costing.avaliar_preco(100, 20, perfil=perfil)
+        self.assertEqual([aval[k] for k in ("taxa_comissao", "taxa_pagamento", "impostos", "repasse_ifood", "recebe_liquido", "lucro")],
+                         [23, 3.2, 4, 73.8, 69.8, 49.8])
+        self.assertEqual(aval["margem_sobre_liquido"], round(49.8 / 69.8, 4))
+        minimo = costing.cenarios_preco(20, perfil=perfil)
+        self.assertLess(costing.avaliar_preco(minimo["preco_minimo"] - 0.01, 20, perfil=perfil)["lucro"], 0)
+        self.assertGreaterEqual(costing.avaliar_preco(minimo["preco_minimo"], 20, perfil=perfil)["lucro"], 0)
+        self.assertGreater(costing.avaliar_preco(minimo["preco_minimo_com_sobra"], 20, perfil=perfil)["lucro"], 0)
+        presencial = costing.avaliar_preco(100, 20, perfil={**perfil, "pagamento_online": False})
+        self.assertEqual((presencial["taxa_pagamento"], presencial["recebe_liquido"]), (0, 73))
+
     def test_minimum_price_and_evaluation(self):
         self.assertAlmostEqual(costing.preco_minimo(9.0), 10.0)
         aval = costing.avaliar_preco(20.0, 9.0)
@@ -111,7 +125,8 @@ class ToolsFlowTests(StoreTestCase):
         preco = call("preco_sugerir", cmv_por_porcao=cmv["cmv_por_porcao"], prato_id=cmv["prato_id"], precos_para_simular=[15, 25])
         self.assertEqual(len(preco["cenarios"]), 3)
         self.assertEqual(len(preco["simulacoes"]), 2)
-        self.assertAlmostEqual(preco["preco_minimo"], round(cmv["cmv_por_porcao"] / 0.9, 2))
+        self.assertEqual(preco["preco_minimo"], 7.75)
+        self.assertEqual((preco["taxa_comissao"], preco["taxa_pagamento"]), (0.12, 0.032))
 
         escolhido = preco["cenarios"][1]["preco_sugerido"]
         registro = call("cardapio_registrar", prato_id=cmv["prato_id"], preco_escolhido=escolhido)
@@ -160,12 +175,52 @@ class ToolsFlowTests(StoreTestCase):
         self.assertEqual(out["veredito"], "precisa_confirmar")
         self.assertEqual(len(out["pendencias"]), 3)
         self.assertTrue(any("despensa_atualizar" in p for p in out["pendencias"]))
+        diz("O pote de cobertura de chocolate tem 1 kg.")
         call("despensa_atualizar", ingrediente="Cobertura de chocolate", conteudo_por_unidade={"quantidade": 1, "unidade": "kg"})
         out2 = call("receita_conferir_ingredientes", nome="Bolo", porcoes=8, ingredientes=[
             {"nome": "cobertura de chocolate", "quantidade": 200, "unidade": "g"},
         ])
         cob = out2["ingredientes"][0]
         self.assertEqual(cob["custo_uso_total"], 15.98)  # 0,2 un × R$ 79,90
+
+    def test_confirmacao_da_receita_lanca_so_complementos_e_atualiza_saldo_da_api(self):
+        receita = call("receita_conferir_ingredientes", nome="Frango grelhado", porcoes=10, ingredientes=[
+            {"nome": "Peito de frango", "quantidade": 1, "unidade": "kg"},
+            {"nome": "Mix de pimentas", "quantidade": 50, "unidade": "g", "item_despensa": "",
+             "quantidade_compra": 50, "unidade_compra": "g", "preco_compra_estimado": 0.50},
+            {"nome": "Tempero para aves", "quantidade": 50, "unidade": "g", "item_despensa": "",
+             "quantidade_compra": 50, "unidade_compra": "g", "preco_compra_estimado": 0.75},
+        ])
+        proposta = "\n".join(f"- {linha}" for linha in receita["compras_para_confirmar"])
+        proposta += "\nPosso registrar essas compras na despensa?"
+        historico = [{"role": "assistant", "content": proposta}]
+        falas.registrar(SESSAO, historico, "Quanto vai sobrar se eu comprar?")
+        self.assertFalse(call("despensa_registrar_compras", receita_id=receita["receita_id"])["success"])
+        falas.registrar(SESSAO, historico, "Confirmo tudo isso, adicione ao meu estoque.")
+        antes = Store().obter("Peito de frango")
+        out = call("despensa_registrar_compras", receita_id=receita["receita_id"])
+        self.assertTrue(out["success"], out)
+        self.assertEqual(out["total"], 1.25)
+        self.assertEqual([i["estoque_base"] for i in out["ingredientes"]], [0.05, 0.05])
+        self.assertEqual(Store().obter("Peito de frango"), antes)
+        self.assertEqual(api.tratar("GET", "/api/estado")[1]["orcamento"]["saldo"], 78.75)
+        falas.registrar(SESSAO, historico, "Sim.")
+        self.assertTrue(call("despensa_registrar_compras", receita_id=receita["receita_id"])["ja_registrado"])
+
+    def test_compra_avulsa_exige_dados_da_fala_e_tool_antiga_nao_grava_parcial(self):
+        itens = [{"nome": "Mix de pimentas", "quantidade": 50, "unidade": "g", "preco_total": 0.50},
+                 {"nome": "Tempero para aves", "quantidade": 50, "unidade": "g", "preco_total": 0.75}]
+        diz("Não comprei Mix de pimentas 50 g por R$ 0,50.")
+        self.assertFalse(call("despensa_registrar_compras", compras=itens[:1])["success"])
+        antes = Store().obter("Peito de frango")
+        self.assertFalse(call("despensa_atualizar", ingrediente="Peito de frango", compra={"preco_total": 28},
+                              conteudo_por_unidade={"quantidade": 2, "unidade": "kg"})["success"])
+        self.assertEqual(Store().obter("Peito de frango"), antes)
+        diz("Comprei Mix de pimentas 50 g por R$ 0,50 e Tempero para aves 50 g por R$ 0,75.")
+        adulterados = [itens[0], {**itens[1], "preco_total": 0.50}]
+        self.assertFalse(call("despensa_registrar_compras", compras=adulterados)["success"])
+        self.assertIsNone(Store().obter("Mix de pimentas"))
+        self.assertEqual(call("despensa_registrar_compras", compras=itens)["orcamento"]["saldo"], 78.75)
 
     def test_insufficient_stock_is_flagged_and_priced(self):
         out = call("receita_conferir_ingredientes", nome="Strogonoff", porcoes=6, ingredientes=[

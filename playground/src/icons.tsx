@@ -85,6 +85,43 @@ export function ChartIcon() {
   );
 }
 
+export function SearchIcon() {
+  return (
+    <Icon>
+      <circle cx="10.5" cy="10.5" r="6" />
+      <path d="m15 15 4.5 4.5" />
+    </Icon>
+  );
+}
+
+export function GlobeIcon() {
+  return (
+    <Icon strokeWidth="1.8">
+      <circle cx="12" cy="12" r="9" />
+      <ellipse cx="12" cy="12" rx="4" ry="9" />
+      <path d="M3 12h18" />
+    </Icon>
+  );
+}
+
+export function AgentIcon() {
+  return (
+    <Icon strokeWidth="1.8">
+      <rect x="4" y="7" width="16" height="13" rx="4" />
+      <path d="M12 7V4M10 4h4M9 16h6" />
+      <path d="M8.5 12h.1m6.8 0h.1" strokeWidth="2.8" />
+    </Icon>
+  );
+}
+
+export function ChevronIcon({ direction }: { direction: "left" | "right" }) {
+  return (
+    <Icon>
+      <path d={direction === "left" ? "m14 6-6 6 6 6" : "m10 6 6 6-6 6"} />
+    </Icon>
+  );
+}
+
 export function KitchenIcon() {
   return (
     <Icon strokeWidth="1.8">

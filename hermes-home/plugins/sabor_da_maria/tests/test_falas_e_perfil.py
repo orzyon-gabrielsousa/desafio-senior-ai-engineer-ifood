@@ -232,9 +232,14 @@ class HooksTests(unittest.TestCase):
         log.setLevel(logging.ERROR)  # fora do Hermes o provider de extração não carrega: aviso esperado, sem ruído no teste
         self.addCleanup(log.setLevel, nivel)
         sabor_da_maria.register(ctx)
-        self.assertEqual([n for n, _ in ctx.hooks], ["pre_llm_call", "pre_llm_call", "post_tool_call"])
-        self.assertEqual(len(ctx.tools), 18)
+        self.assertEqual([(n, c.__module__.rsplit(".", 1)[-1]) for n, c in ctx.hooks], [
+            ("pre_llm_call", "falas"), ("pre_llm_call", "painel"),  # falas dela e painel do turno (com o roteiro da pesquisa de receitas)
+            ("pre_llm_call", "memoria"), ("post_llm_call", "memoria"),
+            ("post_tool_call", "falas"), ("post_tool_call", "atividade"),  # resposta do clarify e passo a passo da consultora
+            ("transform_tool_result", "pesquisa")])  # próximo passo no resultado da busca de receita
         self.assertEqual(set(ctx.tools), set(tools.SCHEMAS))
+        self.assertIn("analytics_analises_consultar", ctx.tools)
+        self.assertNotIn("analytics_consultar", ctx.tools)
 
 
 if __name__ == "__main__":

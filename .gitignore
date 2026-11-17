@@ -1,5 +1,8 @@
 # segredos / ambiente local
 .env
+/.sabor-backups/
+/database-internals/*
+!/database-internals/README.md
 
 # modelos (GB): baixe com `make model`
 models/*

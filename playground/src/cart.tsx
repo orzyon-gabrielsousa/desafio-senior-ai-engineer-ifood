@@ -79,8 +79,10 @@ function Linha({
 
 function OrcamentoCard({ estado }: { estado: Estado | null }) {
   const o = estado?.orcamento;
-  if (!o) return <p className="sheet-note error">Não consegui ler o carrinho. Confere se a API subiu com o make up.</p>;
+  if (!o) return <p className="sheet-note error">Não consegui ler o carrinho. Confere se o make run está rodando (a API precisa estar no ar).</p>;
   const usado = o.inicial > 0 ? Math.min(100, Math.max(0, ((o.comprometido + o.carrinho) / o.inicial) * 100)) : 0;
+  const { gasto_confirmado, reservado_cardapio } = o;
+  const comprasPagas = estado?.compras_pagas ?? [];
   return (
     <section className="budget-card" aria-label="Orçamento">
       <dl>
@@ -88,24 +90,49 @@ function OrcamentoCard({ estado }: { estado: Estado | null }) {
           <dt>Orçamento para complementos</dt>
           <dd>{brl(o.inicial)}</dd>
         </div>
-        {o.comprometido > 0 ? (
+        {gasto_confirmado != null && reservado_cardapio != null ? (
+          <>
+            <div>
+              <dt>Compras já pagas</dt>
+              <dd>{brl(gasto_confirmado)}</dd>
+            </div>
+            <div>
+              <dt>Reservado para o cardápio</dt>
+              <dd>{brl(reservado_cardapio)}</dd>
+            </div>
+          </>
+        ) : o.comprometido > 0 ? (
           <div>
-            <dt>Já comprometido em pratos</dt>
+            <dt>Compras lançadas ou comprometidas</dt>
             <dd>{brl(o.comprometido)}</dd>
           </div>
         ) : null}
         <div>
-          <dt>No carrinho (o que você compra)</dt>
+          <dt>A comprar no carrinho</dt>
           <dd>{brl(o.carrinho)}</dd>
         </div>
         <div className={o.saldo <= 0 ? "saldo none" : "saldo"}>
-          <dt>Saldo</dt>
+          <dt>Saldo disponível</dt>
           <dd>{brl(o.saldo)}</dd>
         </div>
       </dl>
-      <div className="meter" role="img" aria-label={`${Math.round(usado)}% do orçamento usado`}>
+      <div className="meter" role="img" aria-label={`${Math.round(usado)}% do orçamento destinado a compras`}>
         <span style={{ width: `${usado}%` }} />
       </div>
+      <p className="budget-note">Os ingredientes que você já tem entram no custo da receita sem gastar de novo o orçamento de compras.</p>
+      {comprasPagas.length > 0 ? (
+        <details className="budget-paid">
+          <summary>Ver compras pagas</summary>
+          <ul>
+            {comprasPagas.map((compra, posicao) => (
+              <li key={posicao}>
+                <span>{compra.ingrediente} · {quantidade(compra.quantidade, compra.unidade)}</span>
+                <strong>{brl(compra.preco_total)}</strong>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
     </section>
   );
 }
@@ -138,7 +165,7 @@ function PratoCard({
             {parcial ? ` · você compra ${brl(grupo.aComprar)}, o resto já tem` : ""}
           </small>
         </div>
-        <span className="prato-total">{brl(grupo.valor)}</span>
+        <span className="prato-total"><small>Custo dos ingredientes</small>{brl(grupo.valor)}</span>
       </header>
       {alertas.map((alerta) => (
         <AvisoCozinha key={`${alerta.nivel}-${alerta.mensagens[0]}`} alerta={alerta} onCozinha={onCozinha} />
@@ -587,9 +614,10 @@ type CartSheetProps = {
   onClose: () => void;
   onAsk: () => void;
   onCozinha: () => void;
+  onPratos: () => void;
 };
 
-export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha }: CartSheetProps) {
+export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha, onPratos }: CartSheetProps) {
   const [aba, setAba] = useState<"carrinho" | "salvos">("carrinho");
   const [forma, setForma] = useState<"ingrediente" | "prato">("ingrediente");
   const [erro, setErro] = useState<string | null>(null);
@@ -650,7 +678,14 @@ export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha }: CartShee
           </button>
 
           {total === 0 ? (
-            <p className="sheet-note vazio">O carrinho está vazio. Adicione um prato ou ingrediente abaixo, ou peça sugestões à consultora.</p>
+            <div className="sheet-note vazio">
+              {estado?.pratos_escolhidos?.length ? (
+                <>
+                  Seu carrinho está vazio. Acompanhe a ficha e os custos em Seus pratos.
+                  <div><button type="button" className="link-btn" onClick={onPratos}>Ver seus pratos escolhidos</button></div>
+                </>
+              ) : "O carrinho está vazio. Adicione um prato ou ingrediente abaixo, ou peça sugestões à consultora."}
+            </div>
           ) : null}
 
           {pratos.length > 0 ? <h3 className="sheet-label">Pratos ({pratos.length})</h3> : null}

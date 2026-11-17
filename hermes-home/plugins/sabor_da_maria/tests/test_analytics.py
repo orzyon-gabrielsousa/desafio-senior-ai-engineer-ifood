@@ -13,7 +13,8 @@ from ._base import SESSAO, StoreTestCase
 
 
 def call(name, **args):
-    return json.loads(tools.HANDLERS[name](args, session_id=SESSAO))
+    handler = tools.analytics_consultar if name == "analytics_consultar" else tools.HANDLERS[name]
+    return json.loads(handler(args, session_id=SESSAO))
 
 
 CABECALHO = "| # | Prato | Categoria | Preço médio (R$) | Faixa (R$) | Índice de vendas | Ingredientes típicos |\n|---|---|---|---|---|---|---|\n"
@@ -153,13 +154,15 @@ class BaseDoRepositorioTests(unittest.TestCase):
         self.assertIsNotNone(self.raiz, "pasta prompts/base-de-conhecimento/pratos-mais-vendidos não encontrada")
         self.assertTrue((self.raiz / "brasil.md").is_file())
         regioes = {r for _, r in negocio.ESTADOS.values()}
-        for pasta in sorted(p for p in self.raiz.iterdir() if p.is_dir()):
+        pastas = {p for p in self.raiz.iterdir() if p.is_dir() and p.name != "evidencias"}
+        for pasta in pastas:
             self.assertTrue((pasta / "_regiao.md").is_file(), pasta.name)
-        self.assertEqual({p.name for p in self.raiz.iterdir() if p.is_dir()}, {r.lower() for r in regioes})
+        self.assertEqual({p.name for p in pastas}, {r.lower() for r in regioes})
+        self.assertEqual({p.stem for p in (self.raiz / "evidencias").glob("*.md")}, {r.lower() for r in regioes} | {"brasil"})
         self.assertTrue((self.raiz / "README.md").is_file())
 
     def test_todo_arquivo_le_e_traz_o_aviso_de_dados_de_exemplo(self):
-        arquivos = [p for p in self.raiz.rglob("*.md") if p.name != "README.md"]
+        arquivos = [p for p in self.raiz.rglob("*.md") if p.name != "README.md" and p.parent.name != "evidencias"]
         self.assertGreaterEqual(len(arquivos), 18)
         for p in arquivos:
             texto = p.read_text(encoding="utf-8")
@@ -217,7 +220,7 @@ class BaseDoRepositorioTests(unittest.TestCase):
 
 class LocalizacaoTests(StoreTestCase):
     def test_estado_cidade_e_zona_no_perfil(self):
-        salvo = Store().negocio_salvar({"tipo": "restaurante", "vende": ["prato_do_dia"], "estado": "sp", "cidade": "  São   Paulo ", "zona": "sul"})
+        salvo = Store().negocio_salvar({"tipo": "restaurante", "alimentacao": ["caseira"], "estado": "sp", "cidade": "  São   Paulo ", "zona": "sul"})
         self.assertEqual((salvo["estado"], salvo["cidade"], salvo["zona"]), ("SP", "São Paulo", "sul"))
         local = negocio.localizacao(salvo)
         self.assertEqual((local["regiao"], local["estado_nome"], local["zona"], local["pais"]), ("Sudeste", "São Paulo", "Zona Sul", "Brasil"))
@@ -225,7 +228,7 @@ class LocalizacaoTests(StoreTestCase):
         self.assertIn("local: Zona Sul, São Paulo/SP", negocio.descrever(salvo))
 
     def test_localizacao_e_opcional_e_perfil_antigo_continua_valendo(self):
-        antigo = {"tipo": "restaurante", "vende": [], "publico": "", "observacoes": ""}  # salvo antes da localização existir
+        antigo = {"tipo": "restaurante", "vende": [], "publico": "", "observacoes": ""}  # salvo antes da localização (e do tipo de alimentação) existir
         self.assertEqual(negocio.localizacao(antigo)["estado"], "")
         self.assertIn("local da loja não informado", negocio.descrever(antigo))
         self.assertEqual(negocio.normalizar({"tipo": "restaurante"})["estado"], "")
@@ -247,7 +250,7 @@ class LocalizacaoTests(StoreTestCase):
 
 class FerramentaEApiTests(StoreTestCase):
     def _loja(self):
-        Store().negocio_salvar({"tipo": "restaurante_hotel", "vende": ["prato_do_dia"], "estado": "SP", "cidade": "São Paulo", "zona": "sul"})
+        Store().negocio_salvar({"tipo": "restaurante_hotel", "alimentacao": ["caseira"], "estado": "SP", "cidade": "São Paulo", "zona": "sul"})
 
     def test_consultora_consulta_os_mais_vendidos_da_zona_da_loja(self):
         self._loja()
@@ -258,7 +261,7 @@ class FerramentaEApiTests(StoreTestCase):
         self.assertIn("exemplo", out["aviso"])
         self.assertTrue(out["ranking"][0]["onde"][0].startswith("zona #"))
         frase = out["diga_a_dona_maria"]  # a consultora repete esta frase: traz o aviso de base de exemplo e os cinco primeiros
-        self.assertTrue(frase.startswith("Mais vendidos (prioridade para Zona Sul, São Paulo/SP (região Sudeste); base de exemplo, dados ilustrativos, não são vendas reais): 1) "), frase)
+        self.assertTrue(frase.startswith("Mais vendidos (prioridade para Zona Sul, São Paulo/SP (região Sudeste); base de exemplo, dados ilustrativos): 1) "), frase)
         self.assertEqual(frase.count("(~R$ "), 5)
         self.assertEqual([e.split(":")[0] for e in out["escopos_com_dados"]], ["Zona", "Cidade", "Estado", "Região", "País"])
         cidade = call("analytics_consultar", escopo="cidade", limite=2)
@@ -290,12 +293,17 @@ class FerramentaEApiTests(StoreTestCase):
         self.assertEqual(api.tratar("PUT", "/api/negocio", {"tipo": "restaurante", "estado": "ZZ"})[0], 400)
         self.assertEqual(len(dados["opcoes"]["estados"]), 27)
 
-    def test_painel_leva_os_mais_vendidos_do_lugar(self):
-        self.assertIn("Mais vendidos (só país: loja sem localização; Brasil; dados de exemplo)", painel.texto_do_painel())
+    def test_painel_leva_evidencia_publicada_do_lugar_apenas_na_pesquisa(self):
+        mensagem = "Quais os pratos mais vendidos na minha cidade?"
+        sem_local = painel.texto_do_painel(mensagem=mensagem)
+        self.assertIn("Retrospectiva iFood 2025", sem_local)
+        self.assertNotIn("Virado à paulista", sem_local)
         self._loja()
-        texto = painel.texto_do_painel()
-        self.assertIn("Mais vendidos (prioridade pelo local da loja; Zona Sul, São Paulo; dados de exemplo): 1) ", texto)
+        texto = painel.texto_do_painel(mensagem=mensagem)
+        self.assertIn("Virado à paulista", texto)
+        self.assertNotIn("dados de exemplo", texto)
         self.assertIn("local: Zona Sul, São Paulo/SP", texto)
+        self.assertNotIn("Virado à paulista", painel.texto_do_painel(mensagem="Quanto paguei no arroz?"))
 
 
 if __name__ == "__main__":

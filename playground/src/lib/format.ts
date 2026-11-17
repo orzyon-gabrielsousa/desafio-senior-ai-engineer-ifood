@@ -22,3 +22,12 @@ export function lerNumero(texto: string): number {
 export function chave(texto: string): string {
   return texto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
 }
+
+/** 20 → "<0,1 s"; 400 → "0,4 s"; 4200 → "4,2 s"; 65000 → "1 min 5 s". */
+export function duracao(ms: number): string {
+  if (ms < 50) return "<0,1 s";
+  const segundos = ms / 1000;
+  if (segundos < 60) return `${segundos.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
+  const minutos = Math.floor(segundos / 60);
+  return `${minutos} min ${Math.round(segundos - minutos * 60)} s`;
+}

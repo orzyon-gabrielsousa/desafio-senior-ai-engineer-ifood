@@ -6,20 +6,16 @@ export type Prompt = {
 
 // Boas-vindas do chat: texto fixo da interface, não vai no histórico enviado ao modelo.
 export const WELCOME =
-  "Oi, Dona Maria! Eu sou a consultora de cardápio do **Sabor da Maria**.\n\nPesquiso receitas de verdade, vejo o que mais vende na sua região, confiro a despensa, ajudo a montar o carrinho dentro do seu saldo e mostro a conta aberta, prato por prato e ingrediente por ingrediente. O preço quem escolhe é você.\n\nAntes de qualquer prato, vou conhecer a sua **cozinha**: equipamentos, utensílios, técnicas e a rotina. O que você contar fica salvo em **Minha cozinha** (menu), onde você também pode marcar e corrigir.";
+  "Oi, Dona Maria! Sou sua consultora de cardápio. Vamos conhecer seu negócio e sua cozinha para montar pratos que você consegue preparar e vender.";
 
 export const PEDIR_SUGESTOES =
-  "Olha o perfil do meu negócio e os pratos mais vendidos na minha zona e cidade. Me sugere pratos, abre os ingredientes com o valor de cada um e coloca no carrinho o que falta, dentro do meu saldo.";
-
-// Prato escolhido no Analytics: a consultora abre os ingredientes e os valores antes de pôr no carrinho.
-export const montarPrato = (prato: string) =>
-  `Quero vender "${prato}" no meu delivery. Abre os ingredientes com o valor de cada um e coloca no carrinho, dentro do meu saldo.`;
+  "Pesquise na internet receitas para o meu delivery que aproveitem a minha despensa e combinem com a região da loja. Mostre as fontes e o que eu precisaria comprar. Quero escolher um prato com você.";
 
 export const STARTERS: Prompt[] = [
   {
-    kicker: "Cozinha",
-    title: "Contar da minha cozinha",
-    text: "Oi, sou a Dona Maria. Quero contar como é a minha cozinha.",
+    kicker: "Começar",
+    title: "Contar do meu negócio",
+    text: "Oi, sou a Dona Maria. Quero contar do meu negócio e da minha cozinha.",
   },
   {
     kicker: "Começar",
@@ -35,11 +31,6 @@ export const STARTERS: Prompt[] = [
     kicker: "Números",
     title: "Quanto eu paguei",
     text: "O que eu tenho na despensa e quanto paguei em cada coisa?",
-  },
-  {
-    kicker: "Negócio",
-    title: "Sugestões do meu negócio",
-    text: PEDIR_SUGESTOES,
   },
   {
     kicker: "Fechamento",

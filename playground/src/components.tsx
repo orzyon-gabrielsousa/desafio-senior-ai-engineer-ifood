@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { Avatar, IfoodLogo, Mark } from "./brand";
-import { CartIcon, ChartIcon, ChatIcon, CheckIcon, CloseIcon, KitchenIcon, MenuIcon, PlusIcon, SendIcon, StopIcon, StoreIcon } from "./icons";
-import { brl } from "./lib/format";
+import { esconderPedidoCadastro } from "./cadastro-chat";
+import { AgentIcon, AlertIcon, CartIcon, ChartIcon, ChatIcon, CheckIcon, CloseIcon, GlobeIcon, KitchenIcon, MenuIcon, PlusIcon, SendIcon, StopIcon, StoreIcon } from "./icons";
+import { brl, duracao } from "./lib/format";
 import { contarItens, localCurto } from "./lib/loja";
 import { Markdown } from "./lib/markdown";
 import { STARTERS, WELCOME } from "./lib/prompts";
-import { STAGES, stageStatus } from "./lib/tools";
+import { describeStep } from "./lib/tools";
+import type { StepView } from "./lib/tools";
+import type { EstadoHistorico } from "./lib/useHistorico";
 import type { ChatMessage, Conversation, Estado, Online, ToolTrace } from "./types";
 
 const CLOCK = new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" });
@@ -37,8 +40,8 @@ function BudgetBar({ estado, onOpen }: { estado: Estado | null; onOpen: () => vo
         <strong>{o ? brl(o.inicial) : "—"}</strong>
       </span>
       <span className="budget-stat hide-sm">
-        <small>No carrinho</small>
-        <strong>{o ? brl(o.carrinho) : "—"}</strong>
+        <small>Compras e reservas</small>
+        <strong>{o ? brl(o.comprometido + o.carrinho) : "—"}</strong>
       </span>
       <span className="budget-stat saldo">
         <small>Saldo</small>
@@ -81,21 +84,24 @@ export function AppBar({ onMenu, estado, onCart }: { onMenu: () => void; estado:
 type SidebarProps = {
   open: boolean;
   conversations: Conversation[];
+  estadoHistorico: EstadoHistorico;
   activeId: string | null;
   estado: Estado | null;
   onClose: () => void;
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onAgent: () => void;
   onCart: () => void;
   onCozinha: () => void;
   onNegocio: () => void;
   onAnalytics: () => void;
 };
 
-export function Sidebar({ open, conversations, activeId, estado, onClose, onNew, onSelect, onDelete, onCart, onCozinha, onNegocio, onAnalytics }: SidebarProps) {
+export function Sidebar({ open, conversations, estadoHistorico, activeId, estado, onClose, onNew, onSelect, onDelete, onAgent, onCart, onCozinha, onNegocio, onAnalytics }: SidebarProps) {
   const itens = estado ? contarItens(estado.carrinho) : 0;
   const resumoCozinha = estado?.cozinha.resumo;
+  const escolhidos = estado?.pratos_escolhidos?.length ?? 0;
   const tipo = estado?.negocio ? estado.opcoes.tipos.find((opcao) => opcao.id === estado.negocio?.tipo)?.label : undefined;
   const local = localCurto(estado);
   return (
@@ -105,6 +111,13 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
         Nova conversa
       </button>
       <nav className="menu" aria-label="Atalhos">
+        <button type="button" className="menu-item" onClick={() => { onAgent(); onClose(); }}>
+          <AgentIcon />
+          <span>
+            <strong>Agente de IA</strong>
+            <small>Capacidades, atividade e fontes</small>
+          </span>
+        </button>
         <button
           type="button"
           className="menu-item"
@@ -131,7 +144,7 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
           <span>
             <strong>Minha cozinha</strong>
             <small>
-              {!resumoCozinha
+              {escolhidos ? `${escolhidos} ${escolhidos === 1 ? "prato escolhido" : "pratos escolhidos"}` : !resumoCozinha
                 ? "indisponível"
                 : resumoCozinha.respondidos === 0
                   ? "Marque o que você tem e sabe fazer"
@@ -150,7 +163,7 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
           <StoreIcon />
           <span>
             <strong>Meu negócio</strong>
-            <small>{tipo ?? (estado ? "Preencher para receber sugestões" : "indisponível")}</small>
+            <small>{[tipo, local].filter(Boolean).join(" · ") || (estado ? "Preencher para receber sugestões" : "indisponível")}</small>
           </span>
         </button>
         <button
@@ -164,13 +177,17 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
           <ChartIcon />
           <span>
             <strong>Analytics</strong>
-            <small>{local ? `Mais vendidos · ${local}` : "Pratos mais vendidos por região"}</small>
+            <small>Custos, preços e lucro dos seus pratos</small>
           </span>
         </button>
       </nav>
       <p className="nav-label">Conversas</p>
       <ul className="conv-list">
-        {conversations.length === 0 ? <li className="conv-empty">Nenhuma ainda. A primeira começa aqui do lado.</li> : null}
+        {estadoHistorico === "local" ? <li className="conv-empty" role="status">Histórico no navegador. Aguardando conexão com o banco.</li> : null}
+        {estadoHistorico === "parcial" ? <li className="conv-empty" role="status">Algumas alterações ficaram só neste navegador.</li> : null}
+        {conversations.length === 0 && estadoHistorico !== "local" && estadoHistorico !== "parcial" ? (
+          <li className="conv-empty">{estadoHistorico === "carregando" ? "Carregando conversas…" : "Nenhuma ainda. A primeira começa aqui do lado."}</li>
+        ) : null}
         {conversations.map((conversation) => (
           <li key={conversation.id}>
             <button
@@ -208,6 +225,7 @@ export function Sidebar({ open, conversations, activeId, estado, onClose, onNew,
 
 type ChatPaneProps = {
   messages: ChatMessage[];
+  onboarding?: ReactNode;
   draft: string;
   sending: boolean;
   online: Online;
@@ -216,16 +234,25 @@ type ChatPaneProps = {
   onStop: () => void;
   onFill: (text: string) => void;
   focusTick: number;
+  webSearch: boolean;
+  onToggleWebSearch: () => void;
+  compactProgress: ReactNode;
 };
 
-export function ChatPane({ messages, draft, sending, online, onDraft, onSend, onStop, onFill, focusTick }: ChatPaneProps) {
+export function ChatPane({ messages, onboarding, draft, sending, online, onDraft, onSend, onStop, onFill, focusTick, webSearch, onToggleWebSearch, compactProgress }: ChatPaneProps) {
   const threadRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLTextAreaElement>(null);
+  const cadastroVisivel = Boolean(onboarding);
 
   useEffect(() => {
     const thread = threadRef.current;
-    if (thread) thread.scrollTop = thread.scrollHeight;
-  }, [messages]);
+    if (thread && !cadastroVisivel) thread.scrollTop = thread.scrollHeight;
+  }, [messages, cadastroVisivel]);
+
+  useEffect(() => {
+    if (!cadastroVisivel) return;
+    threadRef.current?.querySelector(".cadastro-chat")?.scrollIntoView({ block: "start" });
+  }, [cadastroVisivel]);
 
   useEffect(() => {
     const box = boxRef.current;
@@ -259,13 +286,15 @@ export function ChatPane({ messages, draft, sending, online, onDraft, onSend, on
           </p>
         </div>
       </header>
+      <div className="compact-progress">{compactProgress}</div>
       <div className="thread" ref={threadRef}>
         <div className="thread-inner">
           <p className="day">Hoje</p>
-          <Welcome showChips={messages.length === 0} onFill={onFill} />
-          {messages.map((message) => (
-            <MessageView key={message.id} message={message} />
+          <Welcome showChips={messages.length === 0 && !cadastroVisivel} onFill={onFill} />
+          {messages.map((message, index) => (
+            <MessageView key={message.id} message={message} latest={index === messages.length - 1} />
           ))}
+          {onboarding}
         </div>
       </div>
       {online === false ? (
@@ -274,6 +303,12 @@ export function ChatPane({ messages, draft, sending, online, onDraft, onSend, on
         </p>
       ) : null}
       <form className="composer" onSubmit={submit}>
+        <div className="composer-tools">
+          <button type="button" className="web-search-toggle" aria-pressed={webSearch} disabled={sending} onClick={onToggleWebSearch}>
+            <GlobeIcon />
+            Busca na web
+          </button>
+        </div>
         <div className="composer-box">
           <label className="sr-only" htmlFor="fala">
             Mensagem para a consultora
@@ -283,7 +318,7 @@ export function ChatPane({ messages, draft, sending, online, onDraft, onSend, on
             ref={boxRef}
             rows={1}
             value={draft}
-            placeholder="Escreve do jeito que você falaria com ela…"
+            placeholder={webSearch ? "Digite uma receita ou envie para usar sua despensa" : "Escreve do jeito que você falaria com ela…"}
             disabled={sending}
             onChange={(event) => onDraft(event.target.value)}
             onKeyDown={(event) => {
@@ -298,7 +333,7 @@ export function ChatPane({ messages, draft, sending, online, onDraft, onSend, on
               <StopIcon />
             </button>
           ) : (
-            <button className="send" type="submit" aria-label="Enviar mensagem" title="Enviar" disabled={!draft.trim()}>
+            <button className="send" type="submit" aria-label={webSearch && !draft.trim() ? "Pesquisar receitas para minha despensa" : "Enviar mensagem"} title="Enviar" disabled={!draft.trim() && !webSearch}>
               <SendIcon />
             </button>
           )}
@@ -341,9 +376,81 @@ function Welcome({ showChips, onFill }: { showChips: boolean; onFill: (text: str
   );
 }
 
-function MessageView({ message }: { message: ChatMessage }) {
+function StepMark({ tone }: { tone: StepView["tone"] }) {
+  if (tone === "done") return <CheckIcon />;
+  if (tone === "error" || tone === "locked") return <AlertIcon />;
+  return null; // rodando: o anel girando é o próprio marcador (CSS)
+}
+
+function StepRow({ step, since }: { step: StepView; since?: number }) {
+  return (
+    <li className={`step ${step.tone}`}>
+      <span className="step-mark">
+        <StepMark tone={step.tone} />
+      </span>
+      <div className="step-body">
+        <p className="step-head">
+          <strong className="step-title">{step.title}</strong>
+          {step.detail ? <q className="step-detail">{step.detail}</q> : null}
+          {step.status === "running" && since ? <Elapsed since={since} /> : step.ms !== undefined ? <span className="step-ms">{duracao(step.ms)}</span> : null}
+        </p>
+        {step.summary && step.items.length > 0 ? (
+          <details className="step-more">
+            <summary>{step.summary}</summary>
+            <ul>
+              {step.items.map((item, index) => (
+                <li key={index}>{item}</li>
+              ))}
+            </ul>
+          </details>
+        ) : step.summary ? (
+          <p className="step-sum">{step.summary}</p>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+// Cada ação da consultora aparece aqui enquanto acontece (a busca digitada, a página lida, a despensa, a conta do orçamento)
+// e fica no balão depois, com o que ela achou. Entre uma ação e outra, "Pensando": é o modelo decidindo o próximo passo.
+function Steps({ message, open }: { message: ChatMessage; open: boolean }) {
+  const steps = message.tools.map(describeStep);
+  const running = message.tools.some((tool) => tool.status === "running");
+  const waitingSince = message.tools.reduce((latest, tool) => Math.max(latest, tool.endedAt ?? 0), message.startedAt ?? 0) || undefined;
+  return (
+    <details className="steps" open={open}>
+      <summary>
+        {steps.length} {steps.length === 1 ? "passo" : "passos"} da consultora
+        {message.pending ? <span className="steps-live"> · ao vivo</span> : null}
+      </summary>
+      <ol className="steps-list">
+        {message.tools.map((tool, index) => (
+          <StepRow key={tool.id} step={steps[index]} since={tool.startedAt} />
+        ))}
+        {message.pending && !running ? (
+          <li className="step thinking">
+            <span className="step-mark">
+              <span className="typing" aria-hidden="true">
+                <i />
+                <i />
+                <i />
+              </span>
+            </span>
+            <div className="step-body">
+              <p className="step-head">
+                <strong className="step-title">{message.content ? "Escrevendo a resposta" : "Pensando no próximo passo"}</strong>
+                {waitingSince ? <Elapsed since={waitingSince} /> : null}
+              </p>
+            </div>
+          </li>
+        ) : null}
+      </ol>
+    </details>
+  );
+}
+
+function MessageView({ message, latest }: { message: ChatMessage; latest: boolean }) {
   const mine = message.role === "user";
-  const running = message.tools.find((tool) => tool.status === "running");
   // Só mensagem recém-criada entra animada; ao recarregar a conversa nada pisca.
   const fresh = typeof message.at === "number" && Date.now() - message.at < 2000;
   const classes = ["msg", mine ? "user" : "assistant", fresh ? "fresh" : ""].filter(Boolean).join(" ");
@@ -353,19 +460,10 @@ function MessageView({ message }: { message: ChatMessage }) {
       <div className="msg-col">
         <div className={message.error ? "bubble error" : "bubble"}>
           <span className="sr-only">{mine ? "Dona Maria: " : "Consultora: "}</span>
-          {message.tools.length > 0 ? (
-            <ul className="tools">
-              {message.tools.map((tool) => (
-                <li key={tool.id} className={`tool ${tool.status}`} title={tool.preview}>
-                  <span className="tool-dot" />
-                  {tool.label}
-                  {tool.preview ? <em>{tool.preview}</em> : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {message.content ? <Markdown text={message.content} /> : null}
-          {message.pending && !message.content ? (
+          {mine && message.webSearch ? <p className="message-search"><GlobeIcon /> Busca na web</p> : null}
+          {message.tools.length > 0 ? <Steps message={message} open={message.pending === true || latest} /> : null}
+          {message.content ? <Markdown text={mine ? message.content : esconderPedidoCadastro(message.content)} /> : null}
+          {message.pending && !message.content && message.tools.length === 0 ? (
             <p className="waiting">
               <span className="typing" aria-hidden="true">
                 <i />
@@ -373,13 +471,15 @@ function MessageView({ message }: { message: ChatMessage }) {
                 <i />
               </span>
               <span>
-                {running ? running.label : "Na cozinha"}
+                Pensando
                 {message.startedAt ? <Elapsed since={message.startedAt} /> : null}
               </span>
             </p>
           ) : null}
         </div>
-        {typeof message.at === "number" && !message.pending ? <p className="stamp">{CLOCK.format(message.at)}</p> : null}
+        {typeof message.at === "number" && !message.pending ? (
+          <p className="stamp">{message.cadastroEnviado ? "Dados salvos · " : ""}{CLOCK.format(message.at)}</p>
+        ) : null}
       </div>
     </article>
   );
@@ -388,51 +488,36 @@ function MessageView({ message }: { message: ChatMessage }) {
 type RailProps = {
   tools: ToolTrace[];
   pending: boolean;
+  caminho: ReactNode;
 };
 
-export function Rail({ tools, pending }: RailProps) {
-  const names = tools.map((tool) => tool.name);
-  const running = tools.filter((tool) => tool.status === "running").map((tool) => tool.name);
+export function Rail({ tools, pending, caminho }: RailProps) {
   const current = tools.find((tool) => tool.status === "running");
+  const agora = current ? describeStep(current) : null;
+  const recentes = tools
+    .filter((tool) => tool.status !== "running")
+    .slice(-3)
+    .reverse()
+    .map(describeStep);
   return (
-    <aside className="rail" aria-label="Andamento e regras da casa">
+    <aside className="rail" aria-label="Andamento do cardápio">
+      {caminho}
       <p className="nav-label">Agora</p>
-      <p className="now">{current ? current.label : pending ? "Na cozinha" : "Esperando a Dona Maria"}</p>
-      <p className="nav-label">Regras da casa</p>
-      <dl className="receipt">
-        <div>
-          <dt>Complementos</dt>
-          <dd>R$ 80,00</dd>
-        </div>
-        <div>
-          <dt>Taxa do delivery</dt>
-          <dd>10%</dd>
-        </div>
-        <div>
-          <dt>Ela recebe</dt>
-          <dd>0,90 × P</dd>
-        </div>
-        <div>
-          <dt>Preço mínimo</dt>
-          <dd>CMV ÷ 0,90</dd>
-        </div>
-      </dl>
-      <p className="rail-note">Os números vivos — estoque, CMV, saldo — aparecem na conversa. Aqui é a regra fixa do desafio.</p>
-      <p className="nav-label">Caminho do prato</p>
-      <ol className="stages">
-        {STAGES.map((stage, index) => {
-          const status = stageStatus(names, running, stage);
-          return (
-            <li key={stage.id} className={`stage ${status}`}>
-              <span className="stage-index">{status === "done" ? <CheckIcon /> : index + 1}</span>
+      <p className="now">{agora ? agora.title : pending ? "Pensando…" : "Esperando a Dona Maria"}</p>
+      {agora?.detail ? <p className="now-detail">{agora.detail}</p> : null}
+      {recentes.length > 0 ? (
+        <ol className="recent" aria-label="Últimas ações">
+          {recentes.map((step) => (
+            <li key={step.id} className={step.tone}>
+              <span className="recent-mark">{step.tone === "error" || step.tone === "locked" ? <AlertIcon /> : <CheckIcon />}</span>
               <span>
-                <strong>{stage.title}</strong>
-                <small>{stage.hint}</small>
+                {step.title}
+                {step.detail ? <small>{step.detail}</small> : null}
               </span>
             </li>
-          );
-        })}
-      </ol>
+          ))}
+        </ol>
+      ) : null}
     </aside>
   );
 }

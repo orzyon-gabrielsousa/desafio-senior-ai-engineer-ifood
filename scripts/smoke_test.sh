@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test ponta a ponta do Sabor da Maria. Exige `docker compose up -d` já feito.
+# Smoke test ponta a ponta do Sabor da Maria. Rode com `make run` ou `make up` no ar.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -9,6 +9,13 @@ MODEL_NAME="${MODEL_NAME:-$(grep -E '^MODEL_NAME=' .env 2>/dev/null | cut -d= -f
 MODEL_NAME="${MODEL_NAME:-qwen3-8b}"
 PORT="${INFERENCE_HOST_PORT:-$(grep -E '^INFERENCE_HOST_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)}"
 PORT="${PORT:-8010}"
+
+echo "0) o playground acessa o Hermes e o SQLite pelo nginx"
+PLAYGROUND_ADDR=$(docker compose port playground 80) || fail "playground sem porta publicada (make run)"
+for rota in /hermes/health /api/saude /api/estado /api/cozinha/pratos /api/analytics/analises; do
+  curl -fsS --max-time 10 "http://${PLAYGROUND_ADDR}${rota}" >/dev/null || fail "${rota} falhou pelo playground (docker compose logs playground api hermes)"
+done
+ok "chat e dados locais acessíveis pelo playground"
 
 echo "1) inferência responde em /health (porta ${PORT})"
 curl -fsS "http://localhost:${PORT}/health" >/dev/null || fail "inferência não respondeu (docker compose logs inference-llamacpp)"

@@ -74,13 +74,15 @@ def _numeros(texto: str) -> set[float]:
 class Fala:
     texto: str
     pergunta: str = ""
+    resposta_a: str = field(default="", compare=False, repr=False)
     alcance: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
     numeros: frozenset[float] = field(default=frozenset(), compare=False, repr=False)
 
 
-def _nova(texto: str, pergunta: str = "") -> Fala:
+def _nova(texto: str, pergunta: str = "", *, resposta_a: str = "") -> Fala:
     alcance = _radicais(texto) | (_radicais(pergunta) if pergunta else set())
-    return Fala(texto=texto, pergunta=pergunta, alcance=frozenset(alcance), numeros=frozenset(_numeros(texto)))
+    return Fala(texto=texto, pergunta=pergunta, resposta_a=resposta_a or pergunta,
+                alcance=frozenset(alcance), numeros=frozenset(_numeros(texto)))
 
 
 def _texto(conteudo: Any) -> str:
@@ -119,6 +121,7 @@ def extrair(mensagens: Iterable[Any], mensagem_atual: Any = None) -> list[Fala]:
     """Falas dela num histórico no formato de mensagens do Hermes (roles user/assistant/tool)."""
     falas: list[Fala] = []
     ultima_pergunta = ""
+    ultimo_usuario = ""
     for m in mensagens or []:
         if not isinstance(m, dict):
             continue
@@ -127,17 +130,19 @@ def extrair(mensagens: Iterable[Any], mensagem_atual: Any = None) -> list[Fala]:
             texto = _texto(m.get("content")).strip()
             if texto:
                 ultima_pergunta = texto
+                ultimo_usuario = ""
         elif papel == "user":
             texto = _texto(m.get("content")).strip()
             if texto:
                 curta = len(_palavras(texto)) <= RESPOSTA_CURTA
-                falas.append(_nova(texto, ultima_pergunta if curta else ""))
+                falas.append(_nova(texto, ultima_pergunta if curta else "", resposta_a=ultima_pergunta))
+                ultimo_usuario = texto
         elif papel == "tool":
             falas.extend(_respostas_clarify(m.get("content")))
     atual = _texto(mensagem_atual).strip()
-    if atual and not any(f.texto == atual for f in falas[-2:]):
+    if atual and atual != ultimo_usuario:
         curta = len(_palavras(atual)) <= RESPOSTA_CURTA
-        falas.append(_nova(atual, ultima_pergunta if curta else ""))
+        falas.append(_nova(atual, ultima_pergunta if curta else "", resposta_a=ultima_pergunta))
     return falas
 
 
@@ -221,6 +226,19 @@ def apoia_numero(valor: float, falas: list[Fala], *, minutos: bool = False) -> b
     if minutos and valor:
         alvos.add(float(valor) / 60)
     return any(alvo in f.numeros for f in falas for alvo in alvos)
+
+
+def contem_frase(frases: Iterable[str], falas: list[Fala]) -> bool:
+    """Alguma fala dela tem a frase inteira, palavra por palavra ('zona leste')? É mais exigente que ``apoia``, que só pede as palavras no
+    mesmo texto: 'Rio Grande do Sul, zona norte' não sustenta 'zona sul'."""
+    alvos = [f" {' '.join(_palavras(f))} " for f in frases if _palavras(f)]
+    return any(a in f" {' '.join(_palavras(fala.texto))} " for fala in falas for a in alvos)
+
+
+def cita_sigla(sigla: str, falas: list[Fala]) -> bool:
+    """A sigla (SP) escrita em maiúsculas e sozinha: 'pa' e 'ma' são palavras, 'PA' e 'MA' são estados."""
+    padrao = re.compile(rf"(?<![A-Za-zÀ-ÿ]){re.escape(sigla)}(?![A-Za-zÀ-ÿ])")
+    return any(padrao.search(f.texto) for f in falas)
 
 
 _TEMPO = re.compile(r"\b(\d+(?:[.,]\d+)?|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez)\s*(horas?|h|minutos?|min)\b")

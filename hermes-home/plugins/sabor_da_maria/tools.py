@@ -8,6 +8,7 @@ As tools cobrem as quatro etapas do desafio:
 
 * 2.1/2.3  despensa_listar, despensa_buscar, despensa_atualizar, receita_conferir_ingredientes
 * 2.2      perfil_cozinha_consultar, perfil_cozinha_salvar (elicitação com checklist; a tela Minha cozinha grava no mesmo perfil)
+* negócio  negocio_salvar (onde a loja fica, tipo de negócio e de alimentação, contados na conversa; a tela Meu negócio grava no mesmo registro)
 * 2.4      prato_calcular_cmv, preco_sugerir, cardapio_registrar, cardapio_remover, cardapio_consultar
 * carrinho  carrinho_consultar, carrinho_adicionar, carrinho_adicionar_prato, carrinho_remover, carrinho_montar_da_receita, salvos_salvar
             (saldo = orçamento − carrinho; a tela da Dona Maria mexe no mesmo carrinho pela API)
@@ -25,12 +26,14 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
+import re
 from typing import Any, Callable, Optional
 
-from . import analytics, costing, cozinha, falas
+from . import analytics, compras, costing, cozinha, escolhas, falas, precificacao, taxas
 from . import negocio as negocio_mod
-from .matching import tokens
+from .matching import cortes_incompativeis, tokens
 from .store import OrcamentoEstourado, Store
 from .units import format_base, norm_text, parse_pantry_unit, to_base
 
@@ -152,8 +155,9 @@ def perfil_cozinha_consultar(args: dict) -> dict:
         "pendencias": pend,
         "completo": not pend,
         "perguntas_prontas": cozinha.perguntas_da_cozinha(pend),
-        "orientacao": ("A cozinha dela ainda não está completa. Faça as perguntas de 'perguntas_prontas' em texto, copiando-as (se você tiver a tool "
-                       "clarify, pode usá-la: até 5 por vez, com opções). O que ela já marcou na tela Minha cozinha não se pergunta de novo. "
+        "orientacao": ("A cozinha dela ainda não está completa. Siga o modo de cadastro do painel. Se indicar formulário no chat, use o marcador "
+                       "indicado. Nas outras interfaces, faça as perguntas de 'perguntas_prontas' em texto ou com a tool clarify. "
+                       "O que ela já enviou no formulário ou marcou em Minha cozinha não se pergunta de novo. "
                        "Salve SÓ o que ela responder, com perfil_cozinha_salvar."
                        if pend else "Cozinha completa para os itens essenciais: não pergunte de novo o que está salvo. Pergunte só técnicas ou "
                                     "equipamentos específicos da receita, e salve a resposta."),
@@ -274,11 +278,104 @@ def perfil_cozinha_salvar(args: dict, session_id: Optional[str] = None) -> dict:
         resposta["diga_a_dona_maria"] = ("Salvei na sua cozinha. " + cozinha.texto_do_perfil(perfil, para_ela=True)
                                         + " Você vê e corrige tudo em Minha cozinha (menu)."
                                         + (f" Ainda falta saber: {', '.join(faltam)}." if faltam else " A cozinha está completa."))
-    if pend:
-        resposta["perguntas_prontas"] = cozinha.perguntas_da_cozinha(pend)
+        resposta["regra"] = ("Ao contar para ela o que foi salvo, use só o que está em diga_a_dona_maria. Não acrescente técnicas, equipamentos, números "
+                             "nem lugares que ela não disse: os exemplos das perguntas não são respostas dela.")
+    pend_negocio = negocio_mod.pendencias(store.negocio())
+    if pend or pend_negocio:
+        if pend:
+            resposta["perguntas_prontas"] = cozinha.perguntas_da_cozinha(pend)
         resposta["lembrete"] = ("Antes de perguntar o que falta, releia o que ela acabou de dizer: se ela já falou de técnicas, equipamentos ou rotina, "
                                 "salve agora (cada coisa no seu campo; técnicas em 'tecnicas': nome da técnica → 'sim', 'nao' ou 'aprendendo') "
-                                "e só pergunte o que sobrar.")
+                                "e só pergunte o que sobrar."
+                                + (" O negócio também está incompleto (" + ", ".join(p["titulo"].lower() for p in pend_negocio)
+                                   + "): se ela já falou disso, salve com negocio_salvar." if pend_negocio else ""))
+    return resposta
+
+
+# ----------------------------------------------------------------------------- negócio: onde a loja fica, tipo de negócio e de alimentação
+def _zona_apoiada(zona: str, falas_dela: list[falas.Fala]) -> bool:
+    """'zona leste', 'leste da cidade' ou, para a pergunta sobre a zona, só 'leste'. A palavra solta não vale ('Rio Grande do Sul' não é zona sul)."""
+    frases = ["centro", "zona central"] if zona == "centro" else [f"zona {zona}", f"{zona} da cidade", f"lado {zona}"]
+    if falas.contem_frase(frases, falas_dela):
+        return True
+    return any(len(f.texto.split()) <= 3 and "zona" in norm_text(f.pergunta) and zona in norm_text(f.texto).split() for f in falas_dela)
+
+
+def _sem_apoio_negocio(campo: str, valor: Any, falas_dela: list[falas.Fala]) -> Optional[str]:
+    """Motivo para recusar o item do negócio, ou ``None`` quando alguma fala dela o sustenta."""
+    if campo == "estado":
+        nome = negocio_mod.ESTADOS[valor][0]
+        return None if (falas.apoia([norm_text(nome)], falas_dela) or falas.cita_sigla(valor, falas_dela)) else f"ela não falou do estado {nome}"
+    if campo == "cidade":
+        return None if falas.apoia([valor], falas_dela) else f"ela não falou da cidade {valor}"
+    if campo == "zona":
+        return None if _zona_apoiada(valor, falas_dela) else f"ela não falou da {negocio_mod.ZONAS[valor].lower()}"
+    if campo == "tipo":
+        return None if valor == "outro" or falas.apoia(negocio_mod.TERMOS_TIPO[valor], falas_dela) else f"ela não falou que é {negocio_mod.TIPOS[valor].lower()}"
+    comida = negocio_mod.ALIMENTACAO[valor][0].lower()
+    return None if falas.apoia(negocio_mod.TERMOS_ALIMENTACAO[valor], falas_dela) else f"ela não falou de {comida}"
+
+
+@_tool
+def negocio_salvar(args: dict, session_id: Optional[str] = None) -> dict:
+    """Grava só o que ela disse do negócio. Cada item é conferido com as falas dela (como no perfil da cozinha); o que ela não falou
+    volta em ``recusados`` e NÃO entra. Faz merge com o que já está salvo e a tela Meu negócio mostra o mesmo registro."""
+    store = Store()
+    pedido: dict[str, Any] = {}
+    recusados: list[dict[str, Any]] = []
+    for campo, resolver, rotulo in (("tipo", negocio_mod.resolver_tipo, "tipo de negócio"), ("zona", negocio_mod.resolver_zona, "zona"),
+                                    ("estado", negocio_mod.resolver_estado, "estado")):
+        bruto = args.get(campo)
+        if bruto in (None, ""):
+            continue
+        valor = resolver(bruto)
+        if valor is None:
+            recusados.append({"grupo": campo, "chave": campo, "valor": bruto, "motivo": f"'{bruto}' não é um(a) {rotulo} da lista"})
+        else:
+            pedido[campo] = valor
+    cidade = " ".join(str(args.get("cidade") or "").split())[:60]
+    if cidade:
+        pedido["cidade"] = cidade
+    comidas = args.get("alimentacao")
+    comidas = [comidas] if isinstance(comidas, str) else (comidas if isinstance(comidas, list) else [])
+    for bruto in comidas:
+        valor = negocio_mod.resolver_alimentacao(bruto)
+        if valor is None:
+            recusados.append({"grupo": "alimentacao", "chave": "alimentacao", "valor": bruto, "motivo": f"'{bruto}' não é um tipo de alimentação da lista"})
+        else:
+            pedido.setdefault("alimentacao", []).append(valor)
+
+    verificar = _conferir_falas()
+    falas_dela = falas.da_sessao(session_id) if verificar else []
+    sem_fala = "ainda não tenho a fala dela nesta conversa; peça para ela contar de novo"
+    aceitos: dict[str, Any] = {}
+    for campo, valor in pedido.items():
+        for item in (valor if campo == "alimentacao" else [valor]):
+            motivo = None if not verificar else (sem_fala if falas_dela is None else _sem_apoio_negocio(campo, item, falas_dela))
+            if motivo:
+                recusados.append({"grupo": campo, "chave": campo, "valor": item, "motivo": motivo})
+            elif campo == "alimentacao":
+                aceitos.setdefault("alimentacao", []).append(item)
+            else:
+                aceitos[campo] = item
+
+    negocio = store.negocio_atualizar(aceitos) if aceitos else store.negocio()
+    pend = negocio_mod.pendencias(negocio)
+    resposta: dict[str, Any] = {"success": not recusados or bool(aceitos), "negocio": negocio, "salvo": aceitos, "pendencias": pend, "completo": not pend}
+    if recusados:
+        resposta.update({
+            "bloqueado": not aceitos,
+            "recusados": recusados,
+            "aviso": ("Os itens em 'recusados' NÃO foram salvos: a Dona Maria não disse isso (ou não é uma opção da lista). Não preencha por ela. "
+                      "Pergunte e salve só o que ela responder."),
+        })
+    if aceitos:  # o resumo vai pronto: o 8B, sem ele, "confirma" ao usuário coisas que ela nunca disse
+        resposta["diga_a_dona_maria"] = ("Salvei o seu negócio. " + negocio_mod.resumo_para_ela(negocio) + " Você vê e corrige tudo em Meu negócio (menu)."
+                                        + (f" Ainda falta saber: {', '.join(p['titulo'].lower() for p in pend)}." if pend else " O negócio está completo."))
+        resposta["regra"] = ("Ao contar para ela o que foi salvo, use só o que está em diga_a_dona_maria. Não acrescente técnicas, equipamentos, números "
+                             "nem lugares que ela não disse: os exemplos das perguntas não são respostas dela.")
+    if pend:
+        resposta["perguntas_prontas"] = cozinha.perguntas_iniciais(pend, [])
     return resposta
 
 
@@ -287,12 +384,13 @@ def perfil_cozinha_salvar(args: dict, session_id: Optional[str] = None) -> dict:
 def despensa_listar(args: dict) -> dict:
     store = Store()
     carga = store.ensure_loaded(force=bool(args.get("recarregar")))
-    filtro = norm_text(str(args.get("filtro") or ""))
+    # Vários termos separados por vírgula ou "e" ("frango, batata") valem como "um ou outro": o modelo pequeno manda a lista inteira num campo só.
+    filtros = [t for t in (norm_text(x) for x in re.split(r"[,;/]|\be\b", str(args.get("filtro") or ""))) if t]
     itens = []
     total_pago = 0.0
     for item in store.ingredientes():
         total_pago += item.get("preco_total") or 0
-        if filtro and filtro not in item["nome_norm"]:
+        if filtros and not any(f in item["nome_norm"] for f in filtros):
             continue
         entrada = {
             "ingrediente": item["nome"],
@@ -308,6 +406,7 @@ def despensa_listar(args: dict) -> dict:
         if item.get("reservado_base"):
             entrada["reservado_para_pratos_aceitos"] = item["reservado_legivel"]
         itens.append(entrada)
+    store.registrar_consulta_despensa()
     return {
         "success": True,
         "planilha": carga.get("origem"),
@@ -339,28 +438,75 @@ def despensa_buscar(args: dict) -> dict:
 
 
 @_tool
-def despensa_atualizar(args: dict) -> dict:
+def despensa_atualizar(args: dict, session_id: Optional[str] = None) -> dict:
     store = Store()
     nome = str(args.get("ingrediente") or "").strip()
     if not nome:
         raise ValueError("informe 'ingrediente'")
-    alteracoes = []
-    item = None
+    if "compra" in args or args.get("novo"):
+        raise ValueError("use despensa_registrar_compras para dar entrada de uma compra e atualizar o saldo")
     conteudo = args.get("conteudo_por_unidade")
-    if isinstance(conteudo, dict):
-        item = store.atualizar_conteudo(nome, _num(conteudo.get("quantidade"), 0.0) or 0.0, str(conteudo.get("unidade") or "g"))
-        alteracoes.append(f"conteúdo de 1 unidade registrado: {item.get('observacao')}")
-    compra = args.get("compra")
-    if isinstance(compra, dict):
-        item = store.registrar_compra(nome, _num(compra.get("quantidade"), 0.0) or 0.0, str(compra.get("unidade") or "kg"),
-                                      _num(compra.get("preco_total"), 0.0) or 0.0, novo=bool(args.get("novo")))
-        alteracoes.append("compra lançada no estoque (custo unitário recalculado pela média do que foi pago)")
-    if item is None:
-        item = store.obter(nome)
-        if item is None:
-            raise KeyError(f"{nome!r} não está na despensa")
+    if not isinstance(conteudo, dict):
+        raise ValueError("informe o conteúdo de uma unidade da embalagem")
+    quantidade = _num(conteudo.get("quantidade"))
+    unidade = str(conteudo.get("unidade") or "").strip()
+    if quantidade is None or not math.isfinite(quantidade) or quantidade <= 0 or not unidade:
+        raise ValueError("informe a medida positiva de uma embalagem em g, kg, ml ou L")
+    falas_dela = falas.da_sessao(session_id) or []
+    if not any(falas.apoia([nome], [fala]) and compras.medida_citada(fala.texto, quantidade, unidade)
+               for fala in falas_dela[-1:]):
+        raise ValueError("pergunte qual é o conteúdo de uma embalagem; a medida precisa vir da Dona Maria")
+    item = store.atualizar_conteudo(nome, quantidade, unidade)
     return {"success": True, "ingrediente": {k: item.get(k) for k in ("nome", "estoque_legivel", "unidade_base", "custo_unitario_legivel", "custo_unitario_base", "conteudo_un_base", "observacao")},
-            "alteracoes": alteracoes}
+            "alteracoes": [f"conteúdo de 1 unidade registrado: {item.get('observacao')}"]}
+
+
+@_tool
+def despensa_registrar_compras(args: dict, session_id: Optional[str] = None) -> dict:
+    falas_dela = falas.da_sessao(session_id) or []
+    receita_id = args.get("receita_id")
+    fala = falas_dela[-1] if falas_dela else None
+    if not fala or not (compras.pediu_registro(fala.texto)
+                        or (receita_id is not None and compras.confirmou_proposta(fala.texto, fala.resposta_a))):
+        raise ValueError("peça à Dona Maria para confirmar a entrada das compras realizadas na despensa")
+    itens = args.get("compras")
+    store = Store()
+    if receita_id is not None:
+        if itens is not None:
+            raise ValueError("informe só receita_id para lançar os complementos conferidos da receita")
+        receita = store.obter_receita(int(receita_id))
+        if receita is None or receita["dados"].get("sessao_da_conferencia") != session_id:
+            raise ValueError("use o receita_id de uma conferência feita nesta conversa")
+        itens = compras.da_conferencia(receita["dados"]["resultado"])
+        if not itens:
+            raise ValueError("a conferência não tem compras complementares para lançar")
+        if not all(compras.item_confirmado(fala.resposta_a, item) for item in itens):
+            raise ValueError("mostre 'compras_para_confirmar' da conferência e peça confirmação dos itens, quantidades e valores")
+        chave = f"chat-receita-compra:{receita['id']}"
+    else:
+        if not isinstance(itens, list) or not itens:
+            raise ValueError("informe o receita_id da proposta exibida ou as compras que ela informou com nome, quantidade, unidade e preço")
+        for item in itens:
+            if not isinstance(item, dict) or not isinstance(item.get("nome"), str) or not item["nome"].strip():
+                raise ValueError("informe o nome de cada ingrediente comprado")
+            if set(item) - {"nome", "quantidade", "unidade", "preco_total", "compra_id", "carrinho_id"}:
+                raise ValueError("informe apenas os dados da compra; use despensa_atualizar para o conteúdo da embalagem")
+            qtd, preco = item.get("quantidade"), item.get("preco_total")
+            if (type(qtd) not in (int, float) or not math.isfinite(qtd) or qtd <= 0
+                    or type(preco) not in (int, float) or not math.isfinite(preco) or preco < 0
+                    or not isinstance(item.get("unidade"), str) or not item["unidade"].strip()):
+                raise ValueError("informe quantidade positiva, unidade e preço total de cada compra")
+            if not compras.item_confirmado(fala.texto, item):
+                raise ValueError(f"confirme com a Dona Maria o nome, a quantidade e o preço da compra de {item['nome']}")
+        chave = compras.chave_manual(str(session_id), len(falas_dela), fala.texto, fala.resposta_a)
+    try:
+        resultado = store.registrar_compras(itens, chave=chave, receita_id=int(receita_id) if receita_id is not None else None)
+    except OrcamentoEstourado as exc:
+        return _recusa_saldo(exc, store)
+    linhas = compras.mostrar(itens)
+    acao = "Essas compras já foram registradas" if resultado["ja_registrado"] else "Compras registradas na despensa"
+    texto = f"{acao} ({costing.brl(resultado['total'])}). Saldo atual: {costing.brl(resultado['orcamento']['saldo'])}."
+    return {"success": True, **resultado, "compras_registradas": linhas, "diga_a_dona_maria": texto}
 
 
 # ----------------------------------------------------------------------------- resolução de ingredientes
@@ -373,6 +519,7 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
     pendencias: list[str] = []
     estimativas: list[str] = []
     compras: list[dict[str, Any]] = []
+    ingredientes_contados: set[str] = set()
     cmv_total = custo_despensa_total = custo_compra_total = compras_total = 0.0
     for ing in ingredientes:
         if isinstance(ing, str):
@@ -394,9 +541,20 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
             item = store.obter(str(alvo)) or store.melhor_item(str(alvo))
             if item is None:
                 pendencias.append(f"{nome}: '{alvo}' não existe na despensa; use despensa_buscar")
-        elif not explicito:
-            item = store.melhor_item(nome)
-        if qtd <= 0:
+            elif cortes_incompativeis(nome, item["nome"]):
+                linha["pendencia"] = f"{nome}: {item['nome']} é outro corte. Confirme uma adaptação ou informe o corte da receita."
+                pendencias.append(linha["pendencia"])
+                linhas.append(linha)
+                continue
+        else:
+            # Se uma compra já foi registrada com o mesmo nome, use o estoque e o preço pagos.
+            item = store.obter(nome) if explicito else store.melhor_item(nome)
+        identidade = norm_text(item["nome"] if item is not None else nome)
+        if identidade in ingredientes_contados:
+            pendencias.append(f"{nome}: some as quantidades do mesmo ingrediente em uma única linha da receita")
+            continue
+        ingredientes_contados.add(identidade)
+        if not math.isfinite(qtd) or qtd <= 0:
             linha["pendencia"] = "quantidade não informada; estime em g/ml mesmo quando a receita diz 'a gosto'"
             pendencias.append(f"{nome}: {linha['pendencia']}")
             linhas.append(linha)
@@ -447,6 +605,8 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
                         custo_compra_uso = falta * cu
                         compra = {"ingrediente": item["nome"], "quantidade": qtd_c, "unidade": un_c, "preco_estimado": round(preco_c, 2),
                                   "cobre_a_falta": qtd_c * spec.factor >= falta - 1e-9}
+                        if not compra["cobre_a_falta"]:
+                            pendencias.append(f"{nome}: a compra cotada não cobre a falta de {format_base(falta, base)}")
                         memoria.append(f"falta {format_base(falta, base)} × {costing.brl(cu)}/{base} (compra) = {costing.brl(custo_compra_uso)}")
                 elif custo_unit is not None:
                     custo_compra_uso = falta * custo_unit
@@ -482,6 +642,8 @@ def _resolver_ingredientes(store: Store, ingredientes: list[Any]) -> dict[str, A
                     custo = conv.qty_base * cu
                     compra = {"ingrediente": nome, "quantidade": qtd_c, "unidade": un_c, "preco_estimado": round(preco_c, 2),
                               "cobre_a_falta": qtd_c * spec.factor >= conv.qty_base - 1e-9}
+                    if not compra["cobre_a_falta"]:
+                        pendencias.append(f"{nome}: a compra cotada não cobre os {format_base(conv.qty_base, spec.base)} necessários")
                     memoria.append(f"{format_base(conv.qty_base, spec.base)} × {costing.brl(cu)}/{spec.base} (compra de {qtd_c:g} {un_c} por {costing.brl(preco_c)}) = {costing.brl(custo)}")
                     linha.update({"necessario": format_base(conv.qty_base, spec.base), "necessario_base": round(conv.qty_base, 4), "unidade_base": spec.base,
                                   "falta": format_base(conv.qty_base, spec.base), "custo_uso_despensa": 0.0, "custo_uso_compra": round(custo, 2),
@@ -512,6 +674,8 @@ def _orcamento_resumo(store: Store, compras_total: float) -> dict[str, Any]:
     restante = orc["restante"]
     return {
         "inicial": orc["inicial"], "ja_comprometido": orc["comprometido"], "restante": restante,
+        "gasto_confirmado": orc["gasto_confirmado"], "reservado_cardapio": orc["reservado_cardapio"],
+        "no_carrinho": orc["carrinho"], "saldo_atual": orc["saldo"],
         "compras_desta_receita": round(compras_total, 2), "cabe_no_orcamento": compras_total <= restante + 1e-9,
         "sobra_apos_compras": round(restante - compras_total, 2),
     }
@@ -651,6 +815,48 @@ def _recusa(motivo: str, aval: dict[str, Any], **extra: Any) -> dict[str, Any]:
             **({"diga_a_dona_maria": " ".join(frases)} if frases else {}), **extra}
 
 
+def _aviso_prato_nao_aprovado(store: Store, receita: dict[str, Any] | str, aval: dict[str, Any]) -> dict[str, Any]:
+    from .alternativas import alternativa_no_estoque
+
+    nome = receita if isinstance(receita, str) else receita["nome"]
+    bloqueios = aval.get("bloqueios") or []
+    motivo = bloqueios[0]["detalhe"].rstrip(".?") if bloqueios else "a ficha ainda está incompleta"
+    alternativa = alternativa_no_estoque(Store() if store.ignorar_prato_id else store, receita, _avaliar_prato)
+    aviso = f"O prato {nome} ainda não foi aprovado. Motivo: {motivo}."
+    cozinha_aviso = (aval.get("cozinha") or {}).get("mensagens") or []
+    if cozinha_aviso:
+        aviso += " " + cozinha_aviso[0]
+    if alternativa:
+        aviso += (f" {alternativa['nome']} cabe no estoque e na cozinha para {alternativa['porcoes']:g} porções, "
+                  f"sem compras. Quer trocar «{nome}» por «{alternativa['nome']}»?")
+    elif any(b["tipo"] in {"ingrediente_pendente", "orcamento"} for b in bloqueios):
+        aviso += " Não encontrei um prato semelhante com estoque confirmado. Não dá para montar e registrar esta versão com os ingredientes disponíveis."
+    else:
+        aviso += " Não encontrei um prato semelhante que eu pudesse confirmar com a despensa e a cozinha atuais."
+    return {"alternativa_no_estoque": alternativa, "diga_a_dona_maria": aviso}
+
+
+def registrar_troca_confirmada(store: Store, texto: str, resposta_anterior: str) -> Optional[str]:
+    from .alternativas import alternativa_no_estoque
+
+    troca = escolhas.troca_confirmada(texto, resposta_anterior)
+    if troca is None:
+        return None
+    antigo, novo = troca
+    original = next((p for p in store.pratos_em_andamento() if norm_text(p["nome"]) == norm_text(antigo)), None)
+    if original and original["status"] == "aceito":
+        return "O prato já está aprovado no cardápio. Peça para revisar esse registro antes de trocar."
+    receita_id = original.get("receita_id") if original else next(
+        (r["id"] for r in reversed(store.receitas()) if norm_text(r["nome"]) == norm_text(antigo)), None)
+    receita = store.obter_receita(receita_id) if receita_id else None
+    alternativa = alternativa_no_estoque(store, receita or antigo, _avaliar_prato)
+    if alternativa is None or norm_text(alternativa["nome"]) != norm_text(novo):
+        return f"A troca não foi registrada: {novo} não está confirmado com o estoque disponível agora. Informe o que mudou."
+    pratos = store.selecionar_pratos([alternativa], substituir_prato_id=original["id"] if original else None)
+    return (f"A troca foi confirmada e {pratos[0]['nome']} está em Minha cozinha > Pratos, como rascunho #{pratos[0]['id']}. "
+            "Informe apenas que a escolha foi guardada e ofereça continuar a ficha e o preço.")
+
+
 def _reservas_de(res: dict[str, Any], legivel: bool = False) -> list[dict[str, Any]]:
     """Linhas da receita que saem da despensa: viram reserva no aceite."""
     out: list[dict[str, Any]] = []
@@ -667,9 +873,55 @@ def _reservas_de(res: dict[str, Any], legivel: bool = False) -> list[dict[str, A
 
 # ----------------------------------------------------------------------------- 2.3 conferência
 @_tool
-def receita_conferir_ingredientes(args: dict) -> dict:
+def pratos_selecionar(args: dict, session_id: Optional[str] = None) -> dict:
+    falas_dela = falas.da_sessao(session_id) or []
+    fala = falas_dela[-1] if falas_dela else None
+    opcoes = escolhas.escolhidas(fala.texto, escolhas.lista_da_escolha(falas_dela)) if fala else []
+    if not opcoes:
+        pedido = escolhas.pedido_de_escolha(fala.texto) if fala else None
+        if not pedido:
+            raise ValueError("aguarde a Dona Maria escolher os pratos que quer guardar")
+        nomes = args.get("nomes")
+        if not isinstance(nomes, list) or not nomes or not all(
+            isinstance(nome, str) and norm_text(nome) and f" {norm_text(nome)} " in f" {pedido} " for nome in nomes
+        ):
+            raise ValueError("peça os nomes ou números dos pratos mostrados, sem trocar as opções")
+        opcoes = [{"nome": nome} for nome in nomes]
     store = Store()
-    nome = str(args.get("nome") or "").strip() or "Receita sem nome"
+    pratos = store.selecionar_pratos(opcoes)
+    return {"success": True, "pratos_escolhidos": pratos,
+            "diga_a_dona_maria": "As escolhas estão em Minha cozinha › Pratos. Abra Continuar no chat para montar a ficha de cada prato."}
+
+
+@_tool
+def receita_conferir_ingredientes(args: dict, session_id: Optional[str] = None) -> dict:
+    store = Store()
+    prato_id = args.get("prato_id")
+    falas_dela = falas.da_sessao(session_id) or []
+    id_da_fala = escolhas.id_mencionado(falas_dela[-1].texto) if falas_dela else None
+    if id_da_fala is not None:
+        if prato_id is not None and int(prato_id) != id_da_fala:
+            raise ValueError(f"a Dona Maria pediu a conferência do prato #{id_da_fala}")
+        prato_id = id_da_fala
+    nome = str(args.get("nome") or args.get("prato") or "").strip()
+    if falas_dela and id_da_fala is None:
+        opcoes = escolhas.escolhidas(falas_dela[-1].texto, escolhas.lista_da_escolha(falas_dela))
+        if len(opcoes) == 1:
+            escolhido = store.selecionar_pratos(opcoes)[0]
+            if prato_id is not None and int(prato_id) != escolhido["id"]:
+                raise ValueError(f"a Dona Maria escolheu o prato #{escolhido['id']}, {escolhido['nome']}")
+            prato_id = escolhido["id"]
+    fonte_url = args.get("fonte_url")
+    if prato_id is not None:
+        escolhido = store.obter_prato(int(prato_id))
+        if escolhido is None:
+            raise KeyError(f"prato_id {prato_id} não encontrado")
+        if norm_text(nome) not in {"", "receita sem nome", "prato sem nome", norm_text(escolhido["nome"])}:
+            raise ValueError(f"use o nome do prato escolhido {escolhido['nome']!r} ou deixe que o sistema o recupere pelo número")
+        nome = escolhido["nome"]
+        fonte_url = fonte_url or (escolhido["dados"].get("selecao") or {}).get("fonte_url")
+    if not nome or norm_text(nome) in {"receita sem nome", "prato sem nome"}:
+        raise ValueError("informe o nome da receita ou o número do prato escolhido para guardar a ficha certa")
     ingredientes = args.get("ingredientes") or []
     if not isinstance(ingredientes, list) or not ingredientes:
         raise ValueError("informe 'ingredientes' como lista de {nome, quantidade, unidade}")
@@ -688,20 +940,32 @@ def receita_conferir_ingredientes(args: dict) -> dict:
     aval = _avaliar(res, equip, tec, orc, pend_perfil)
     veredito = aval["veredito"]
     dados = {"ingredientes": ingredientes, "resultado": res, "equipamentos": equip, "tecnicas": tec, "veredito": veredito,
+             "bloqueios": aval["bloqueios"], "prato_id": prato_id,
              "equipamentos_necessarios": args.get("equipamentos_necessarios"), "tecnicas_necessarias": args.get("tecnicas_necessarias"),
-             "tempo_preparo_min": args.get("tempo_preparo_min")}
-    receita_id = store.salvar_receita(nome, args.get("fonte_url"), porcoes, dados, "conferida")
+             "tempo_preparo_min": args.get("tempo_preparo_min"), "sessao_da_conferencia": session_id}
+    receita_id = store.salvar_receita(nome, fonte_url, porcoes, dados, "conferida",
+                                      prato_id=int(prato_id) if prato_id is not None else None)
+    aviso = (_aviso_prato_nao_aprovado(store, {"id": receita_id, "nome": nome, "porcoes": porcoes, "dados": dados},
+                                      {**aval, "cozinha": da_cozinha})
+             if veredito != "viavel" else {})
+    texto_conferencia = (f"Ficha de {nome} conferida. Compras complementares previstas: {costing.brl(res['compras_total_estimado'])}. "
+                         f"Saldo atual para compras: {costing.brl(orc['saldo_atual'])}.")
+    if not res["pendencias"]:
+        texto_conferencia += f" Custo dos ingredientes usados no lote: {costing.brl(res['cmv_total'])}."
     proximos = list(aval["proximos_passos"])
     if da_cozinha["mensagens"]:
         proximos.insert(0, "conte a ela, com as palavras de 'avisos_da_cozinha', o que a cozinha dela não faz ou ainda não confirmou")
     if veredito == "viavel":
-        proximos.append(f"se ela gostar da receita, chamar prato_calcular_cmv com receita_id={receita_id}")
+        ref = f"prato #{prato_id}, {nome}," if prato_id is not None else nome
+        proximos.append(f"mostre a conferência e pergunte: 'Você aceita preparar {ref} nessa versão?' Só avance após o aceite dela")
     else:
         proximos.append(f"resolvidos os bloqueios, chamar prato_calcular_cmv com receita_id={receita_id} (ele reavalia sozinho; não precisa conferir de novo)")
     return {
         "success": True,
         "receita_id": receita_id,
         "receita": nome,
+        "prato_id": prato_id,
+        "compras_para_confirmar": compras.mostrar(compras.da_conferencia(res)),
         "porcoes": porcoes,
         "veredito": veredito,
         "bloqueios": aval["bloqueios"],
@@ -713,7 +977,8 @@ def receita_conferir_ingredientes(args: dict) -> dict:
             "precisa_comprar": res["compras"],
             "compras_total_estimado": res["compras_total_estimado"],
             "orcamento": orc,
-            "cmv_previa": {"total": res["cmv_total"], "por_porcao": round(res["cmv_total"] / porcoes, 2) if porcoes else None},
+            "cmv_previa": None if res["pendencias"] else {
+                "total": res["cmv_total"], "por_porcao": round(res["cmv_total"] / porcoes, 2) if porcoes else None},
         },
         "equipamentos": equip,
         "tecnicas": tec,
@@ -723,6 +988,8 @@ def receita_conferir_ingredientes(args: dict) -> dict:
         "pendencias": res["pendencias"],
         "estimativas": res["estimativas"],
         "proximos_passos": proximos,
+        "diga_a_dona_maria": texto_conferencia + (" " + aviso["diga_a_dona_maria"] if aviso else ""),
+        **({"alternativa_no_estoque": aviso["alternativa_no_estoque"]} if aviso else {}),
     }
 
 
@@ -731,19 +998,36 @@ def receita_conferir_ingredientes(args: dict) -> dict:
 def prato_calcular_cmv(args: dict) -> dict:
     store = Store()
     receita_id = args.get("receita_id")
+    prato_id = args.get("prato_id")
+    if receita_id is None and prato_id is not None:
+        escolhido = store.obter_prato(int(prato_id))
+        receita_id = escolhido.get("receita_id") if escolhido else None
     ingredientes = args.get("ingredientes")
     nome = str(args.get("nome") or "").strip()
     porcoes = _num(args.get("porcoes"))
     receita = store.obter_receita(int(receita_id)) if receita_id else None
     if receita_id and not receita:
         raise KeyError(f"receita_id {receita_id} não encontrada")
+    vinculado = receita["dados"].get("prato_id") if receita else None
+    if prato_id is not None or vinculado is not None:
+        prato_id = int(prato_id if prato_id is not None else vinculado)
+        escolhido = store.obter_prato(prato_id)
+        if not receita or not escolhido or escolhido.get("receita_id") != int(receita_id):
+            raise ValueError("use a conferência vinculada a este prato escolhido, ou revise a ficha com receita_conferir_ingredientes")
+        if nome and norm_text(nome) != norm_text(escolhido["nome"]):
+            raise ValueError(f"use o nome do prato escolhido {escolhido['nome']!r}")
+        if ingredientes is not None and ingredientes != receita["dados"]["ingredientes"]:
+            raise ValueError("a ficha deste prato deve ser revisada antes de recalcular o custo")
+        if porcoes and receita["porcoes"] and porcoes != receita["porcoes"]:
+            raise ValueError("redimensione os ingredientes e refaça a conferência antes de alterar as porções")
+        nome = escolhido["nome"]
     if receita and not ingredientes:
         ingredientes = receita["dados"].get("ingredientes") or []
         nome = nome or receita["nome"]
         porcoes = porcoes or receita.get("porcoes")
     if not isinstance(ingredientes, list) or not ingredientes:
         raise ValueError("informe 'ingredientes' (lista) ou 'receita_id' de uma receita já conferida")
-    if not porcoes or porcoes <= 0:
+    if not porcoes or not math.isfinite(porcoes) or porcoes <= 0:
         raise ValueError("informe 'porcoes' (quantas porções a receita rende) para calcular o CMV por porção")
     if receita is None:
         return _recusa(
@@ -756,7 +1040,7 @@ def prato_calcular_cmv(args: dict) -> dict:
     if aval["veredito"] != "viavel":
         return _recusa(
             f"CMV bloqueado: veredito {aval['veredito']} com {len(aval['bloqueios'])} pendência(s); resolva os bloqueios e chame de novo com o mesmo receita_id",
-            aval, receita_id=int(receita_id))
+            aval, receita_id=int(receita_id), **_aviso_prato_nao_aprovado(store, receita, aval))
     res = aval["resultado"]
     cmv_total = res["cmv_total"]
     cmv_porcao = round(cmv_total / porcoes, 2)
@@ -766,7 +1050,7 @@ def prato_calcular_cmv(args: dict) -> dict:
     memoria.append(f"CMV por porção = {costing.brl(cmv_total)} ÷ {porcoes:g} porções = {costing.brl(cmv_porcao)}")
     dados = {"ingredientes": ingredientes, "resultado": res, "memoria_de_calculo": memoria,
              "avaliacao": {k: aval[k] for k in ("veredito", "equipamentos", "tecnicas", "orcamento", "requisitos")}}
-    prato_id = store.salvar_prato(nome or "Prato sem nome", int(receita_id), porcoes, cmv_total, cmv_porcao, dados)
+    prato_id = store.salvar_prato(nome or "Prato sem nome", int(receita_id), porcoes, cmv_total, cmv_porcao, dados, prato_id=prato_id)
     return {
         "success": True,
         "prato_id": prato_id,
@@ -778,72 +1062,149 @@ def prato_calcular_cmv(args: dict) -> dict:
         "custo_vindo_de_compras": res["custo_vindo_de_compras"],
         "compras_complementares": res["compras"],
         "compras_total_estimado": res["compras_total_estimado"],
+        "diga_a_dona_maria": (f"Custo dos ingredientes usados no prato: {costing.brl(cmv_total)} para {porcoes:g} porções "
+                             f"({costing.brl(cmv_porcao)} por porção). Na despensa: {costing.brl(res['custo_vindo_da_despensa'])} "
+                             f"dos ingredientes usados. Compras complementares previstas: {costing.brl(res['compras_total_estimado'])}. "
+                             f"Saldo atual para compras: {costing.brl(orc['saldo_atual'])}."),
         "orcamento": orc,
         "memoria_de_calculo": memoria,
         "formula": "CMV = Σ (quantidade usada × custo unitário); custo unitário = preço total pago ÷ quantidade comprada (abas Precos × Despensa)",
-        "preco_minimo_por_porcao": round(costing.preco_minimo(cmv_porcao), 2),
+        "preco_minimo_por_porcao": costing.preco_minimo_centavo(cmv_total / porcoes, perfil=store.perfil_precificacao()),
         "pendencias": res["pendencias"],
         "estimativas": res["estimativas"],
         "itens": res["itens"],
         "veredito": aval["veredito"],
         "avisos_operacionais": aval["avisos_operacionais"],
         "reservas_previstas": _reservas_de(res, legivel=True),
-        "proximo_passo": (f"chame preco_sugerir com prato_id={prato_id} para montar 2–3 cenários; só cardapio_registrar "
+        "proximo_passo": (f"chame preco_sugerir com prato_id={prato_id}, aceite_prato e as opções da consultora para salvar 2–3 cenários; só cardapio_registrar "
                           "(com o preço que ela escolher) reserva o estoque e compromete o orçamento"),
     }
 
 
 @_tool
-def preco_sugerir(args: dict) -> dict:
-    store = Store()
+def preco_sugerir(args: dict, session_id: Optional[str] = None) -> dict:
     prato_id = args.get("prato_id")
     if not prato_id:
         return _recusa(
             "preço só é sugerido para prato com CMV calculado pela tool: chame prato_calcular_cmv e passe o prato_id",
             {"bloqueios": [_bloqueio("sem_cmv_calculado", "cmv_por_porcao avulso não é aceito: o CMV precisa vir de prato_calcular_cmv (conta de cabeça não vale)")],
              "proximos_passos": ["chamar prato_calcular_cmv (com receita_id) e depois preco_sugerir com prato_id"]})
+    store = Store(ignorar_prato_id=int(prato_id))
     prato = store.obter_prato(int(prato_id))
     if not prato:
         raise KeyError(f"prato_id {prato_id} não encontrado")
     if prato["status"] == "removido":
         return _recusa("prato removido do cardápio; se ela quiser retomá-lo, calcule de novo com prato_calcular_cmv",
                        {"bloqueios": [_bloqueio("prato_removido", f"prato {prato_id} foi removido")], "proximos_passos": ["chamar prato_calcular_cmv de novo"]})
-    cmv = float(prato.get("cmv_porcao") or 0)
+    if prato["status"] == "selecionado":
+        return _recusa("o prato escolhido ainda não tem custo calculado", {
+            "bloqueios": [_bloqueio("sem_cmv_calculado", "monte a ficha e calcule o custo antes de sugerir o preço")],
+            "proximos_passos": ["usar receita_conferir_ingredientes com prato_id e depois prato_calcular_cmv"]})
+    cmv = precificacao.custo_por_porcao(prato)
+    ficha = precificacao.ficha_atual(store, prato)
+    if not isinstance(ficha, str):
+        porcoes_atual, resultado_atual = ficha
+        cmv = resultado_atual["cmv_total"] / porcoes_atual
     avisos: list[str] = []
     informado = _num(args.get("cmv_por_porcao"))
-    if informado is not None and abs(informado - cmv) > 0.005:
+    if informado is not None and abs(informado - round(cmv, 2)) > 0.005:
         avisos.append(f"cmv_por_porcao informado ({costing.brl(informado)}) difere do calculado pela tool ({costing.brl(cmv)}); os cenários usam o calculado")
-    taxa = _num(args.get("taxa_plataforma"), costing.TAXA_PADRAO) or costing.TAXA_PADRAO
-    if taxa > 1:
-        taxa = taxa / 100.0
-    margens = args.get("margens")
-    if isinstance(margens, list) and margens:
-        margens = [m / 100.0 if m > 1 else m for m in (_num(x, 0.0) or 0.0 for x in margens)]
-    else:
+    perfil = store.perfil_precificacao()
+    comissao, pagamento, _ = taxas.componentes(perfil)
+    taxa = round(comissao + pagamento, 12)
+    if _num(args.get("taxa_plataforma"), taxa) not in (taxa, taxa * 100):
+        avisos.append("Usei as taxas configuradas em Analytics.")
+    if perfil["imposto"] is None:
+        avisos.append("Impostos pendentes no Analytics. Os valores são provisórios.")
+    passo = _num(args.get("arredondar_para"), 0.5)
+    if not math.isfinite(passo) or passo < 0.01 or round(passo, 2) != passo:
+        raise ValueError("arredondar_para deve ser um valor positivo em centavos inteiros")
+
+    falas_dela = falas.da_sessao(session_id) or []
+    aceite = args.get("aceite_prato")
+    confirmado = precificacao.confirmou_prato(aceite, prato["nome"], falas_dela, prato_id=int(prato_id))
+    if aceite is not None and not confirmado:
+        return _recusa(
+            "para salvar a análise, falta a confirmação desta versão do prato",
+            {"bloqueios": [_bloqueio("sem_aceite_do_prato", "faltou uma resposta afirmativa sobre este prato")],
+             "proximos_passos": [f"pergunte 'Você aceita preparar o prato #{prato_id}, {prato['nome']}, nessa versão?'"]})
+    if not confirmado:
+        # Chamadas antigas ou simulações explícitas continuam disponíveis e não povoam o Analytics.
+        margens_avulsas = args.get("margens")
         margens = None
-    saida = costing.cenarios_preco(cmv, taxa, margens, args.get("nomes"), _num(args.get("arredondar_para"), 0.5) or 0.5)
+        if isinstance(margens_avulsas, list) and margens_avulsas:
+            margens = [m / 100.0 if m > 1 else m for m in (_num(x, 0.0) or 0.0 for x in margens_avulsas)]
+        saida = costing.cenarios_preco(cmv, margens=margens, nomes=args.get("nomes"), arredondar_para=passo, perfil=perfil)
+    else:
+        if not math.isfinite(cmv) or cmv <= 0:
+            raise ValueError("confira os custos dos ingredientes para obter um CMV por porção maior que zero")
+        if any(k in args for k in ("margens", "nomes", "cenario_recomendado", "recomendacao")):
+            margens, nomes, recomendado, recomendacao = precificacao.cenarios_da_consultora(args)
+        else:
+            margens, nomes = costing.MARGENS_PADRAO, costing.NOMES_PADRAO
+            recomendado, recomendacao = 2, "O cenário intermediário equilibra preço de venda e sobra depois dos custos considerados."
+        lucro_alvo = precificacao.valor_da_meta(args, "lucro_alvo")
+        custos_fixos = precificacao.valor_da_meta(args, "custos_fixos")
+
+        receita = store.obter_receita(prato["receita_id"]) if prato.get("receita_id") else None
+        if receita is None:
+            raise ValueError("o prato precisa de uma receita conferida")
+        resultado_anterior = prato["dados"]["resultado"]
+        aval = _avaliar_prato(store, prato["dados"]["ingredientes"], receita)
+        if aval["veredito"] != "viavel":
+            return _recusa("resolva as pendências da receita antes de montar os cenários", aval)
+        resultado = aval["resultado"]
+        if any(resultado[k] != resultado_anterior[k] for k in ("cmv_total", "compras_total_estimado")):
+            return _recusa(
+                "os custos mudaram desde que o CMV foi calculado",
+                {"bloqueios": [_bloqueio("numeros_mudaram", "calcule o CMV novamente para salvar cenários atualizados")],
+                 "proximos_passos": [f"chamar prato_calcular_cmv com receita_id={receita['id']}"]})
+
+        saida = costing.cenarios_preco(cmv, margens=margens, nomes=nomes, arredondar_para=passo, perfil=perfil)
+        if len({c["preco_sugerido"] for c in saida["cenarios"]}) != len(margens):
+            saida = costing.cenarios_preco(cmv, margens=margens, nomes=nomes, arredondar_para=0.01, perfil=perfil)
+        if len({c["preco_sugerido"] for c in saida["cenarios"]}) != len(margens):
+            raise ValueError("escolha margens mais distantes para oferecer preços diferentes")
+        if lucro_alvo is not None or custos_fixos is not None:
+            meta = (lucro_alvo or 0) + (custos_fixos or 0)
+            for c in saida["cenarios"]:
+                c["porcoes_para_meta"] = precificacao.porcoes_para_meta(cmv, c["preco_sugerido"], meta, perfil=perfil)
+        saida.update({
+            "cmv_estimado": bool(resultado["compras"] or resultado["estimativas"]),
+            "arredondar_para": passo,
+            "cenario_recomendado": recomendado,
+            "recomendacao": recomendacao,
+            "lucro_alvo": lucro_alvo,
+            "custos_fixos": custos_fixos,
+        })
+        store.salvar_analise_preco(int(prato_id), saida)
     simulacoes = args.get("precos_para_simular")
     if isinstance(simulacoes, list) and simulacoes:
-        saida["simulacoes"] = costing.simular_precos(cmv, [p for p in (_num(x) for x in simulacoes) if p], taxa)
+        saida["simulacoes"] = costing.simular_precos(cmv, [p for p in (_num(x) for x in simulacoes) if p], perfil=perfil)
     saida.update({
         "success": True,
         "prato_id": int(prato_id),
         "prato": prato["nome"],
+        "analise_salva": confirmado,
         "avisos": avisos,
-        "orientacao": ("Explique a taxa de 10%, mostre o preço mínimo e os cenários com a conta aberta, e pergunte qual "
-                       "preço a Dona Maria quer adotar. A decisão é dela; depois registre com cardapio_registrar."),
+        "orientacao": (f"Comece pelo mínimo de {costing.brl(saida['preco_minimo'])} por porção, que cobre os custos considerados. "
+                       + ("Diga que a projeção ainda depende da alíquota de impostos. " if perfil["imposto"] is None else "")
+                       + "Apresente os valores calculados dos cenários. Quando houver volume para uma meta, diga que ele inclui os custos fixos informados "
+                       "e depende de vender as porções. "
+                       + ("Diga que a análise foi salva em Analytics. " if confirmado else "")
+                       + "Pergunte qual preço ela quer adotar; só depois registre com cardapio_registrar."),
     })
     return saida
 
 
 @_tool
-def cardapio_registrar(args: dict) -> dict:
+def cardapio_registrar(args: dict, session_id: Optional[str] = None) -> dict:
     prato_id = args.get("prato_id")
     preco = _num(args.get("preco_escolhido"))
     if not prato_id or preco is None:
         raise ValueError("informe 'prato_id' e 'preco_escolhido'")
-    if preco <= 0:
-        raise ValueError("'preco_escolhido' precisa ser maior que zero")
+    if not math.isfinite(preco) or preco <= 0 or round(preco, 2) != preco:
+        raise ValueError("'preco_escolhido' precisa ser positivo, com até duas casas decimais")
     prato_id = int(prato_id)
     # A reavaliação ignora reservas/compras deste mesmo prato: repetir a chamada (retry, troca de preço) não duplica nada.
     store = Store(ignorar_prato_id=prato_id)
@@ -855,17 +1216,28 @@ def cardapio_registrar(args: dict) -> dict:
                        {"bloqueios": [_bloqueio("prato_removido", f"prato {prato_id} foi removido")],
                         "proximos_passos": ["chamar prato_calcular_cmv de novo e apresentar os preços outra vez"]})
     receita = store.obter_receita(int(prato["receita_id"])) if prato.get("receita_id") else None
-    if receita is None:
-        return _recusa("prato sem receita conferida não entra no cardápio",
-                       {"bloqueios": [_bloqueio("sem_receita_conferida", "não há como checar equipamentos e técnicas de um prato que não passou por receita_conferir_ingredientes")],
-                        "proximos_passos": ["chamar receita_conferir_ingredientes, depois prato_calcular_cmv com receita_id, preco_sugerir e só então cardapio_registrar"]})
+    if receita is None or prato["status"] == "selecionado":
+        bloqueios = (receita or {}).get("dados", {}).get("bloqueios") or [
+            _bloqueio("sem_ficha_final", "falta concluir a conferência e calcular o custo do prato")]
+        pendencias = {"bloqueios": bloqueios, "proximos_passos": ["retomar a ficha do prato salvo e resolver as pendências"]}
+        return _recusa("o prato escolhido ainda não está aprovado", pendencias,
+                       **_aviso_prato_nao_aprovado(store, receita or prato["nome"], pendencias))
+    falas_dela = (falas.da_sessao(session_id) or []) if session_id else []
+    fala = falas_dela[-1] if falas_dela else None
+    if session_id and "selecao" in prato["dados"]:
+        if not fala or escolhas.preco_para_registrar(fala.texto) != preco or not escolhas.pediu_registro_do_prato(
+            fala.texto, fala.resposta_a, prato_id, prato["nome"]
+        ):
+            return _recusa("o preço de venda ainda não foi confirmado para este prato", {
+                "bloqueios": [_bloqueio("sem_escolha_de_preco", "aguarde a escolha do preço e o pedido de registro no cardápio")],
+                "proximos_passos": [f"mostre os cenários e pergunte qual preço ela escolhe para registrar o prato #{prato_id}"]})
     ingredientes = prato["dados"].get("ingredientes") or []
     # Trava 1: o estado ATUAL (perfil, despensa disponível, orçamento) precisa estar 'viavel'. O que o modelo
     # escreveu na conversa não conta; só o que foi salvo com perfil_cozinha_salvar / despensa_atualizar.
     aval = _avaliar_prato(store, ingredientes, receita)
     if aval["veredito"] != "viavel":
         return _recusa(f"registro bloqueado: veredito {aval['veredito']}; o cardápio só aceita prato sem pendência, "
-                       "mesmo que a conversa diga que está tudo certo", aval)
+                       "mesmo que a conversa diga que está tudo certo", aval, **_aviso_prato_nao_aprovado(store, receita, aval))
     res = aval["resultado"]
     porcoes = float(prato.get("porcoes") or 0)
     cmv_porcao = round(res["cmv_total"] / porcoes, 2) if porcoes else None
@@ -874,15 +1246,18 @@ def cardapio_registrar(args: dict) -> dict:
     res_antes = prato["dados"].get("resultado") or {}
     cmv_antes = float(prato.get("cmv_porcao") or 0)
     compras_antes = float(res_antes.get("compras_total_estimado") or 0)
-    if abs(cmv_antes - float(cmv_porcao or 0)) > 0.005 or abs(compras_antes - float(res["compras_total_estimado"] or 0)) > 0.005:
+    perfil_precificacao = store.perfil_precificacao()
+    referencia = re.search(r"\bCotação ([a-f0-9]{12})\b", fala.texto, re.IGNORECASE) if fala else None
+    versao_atual = precificacao.cotacao(prato, porcoes, res, perfil_precificacao)
+    custos_mudaram = res["cmv_total"] != prato["cmv_total"] or abs(compras_antes - float(res["compras_total_estimado"] or 0)) > 0.005
+    if (referencia and referencia[1].lower() != versao_atual) or (custos_mudaram and not referencia):
         return _recusa(
             "os números mudaram desde que o CMV foi apresentado (outro prato reservou estoque, ou despensa/orçamento mudaram); "
             "o preço escolhido não vale para a versão nova",
             {"veredito": "precisa_confirmar",
              "bloqueios": [_bloqueio("numeros_mudaram", f"CMV/porção {costing.brl(cmv_antes)} → {costing.brl(float(cmv_porcao or 0))}; "
                                                         f"compras {costing.brl(compras_antes)} → {costing.brl(res['compras_total_estimado'])}")],
-             "proximos_passos": [f"chamar prato_calcular_cmv de novo com receita_id={receita['id']}, apresentar o novo CMV e novos cenários "
-                                 "(preco_sugerir) e pedir a escolha dela outra vez"]},
+             "proximos_passos": ["peça que ela revise e escolha o preço atualizado em Analytics, ou apresente novamente o CMV e os cenários no chat"]},
             antes={"cmv_por_porcao": cmv_antes, "compras_total": compras_antes},
             agora={"cmv_por_porcao": cmv_porcao, "compras_total": res["compras_total_estimado"]})
     ja_registrado = prato["status"] == "aceito"
@@ -890,14 +1265,17 @@ def cardapio_registrar(args: dict) -> dict:
              "avaliacao": {k: aval[k] for k in ("veredito", "equipamentos", "tecnicas", "orcamento", "requisitos")},
              "registro": {"preco_escolhido": preco, "porcoes": porcoes, "cmv_por_porcao": cmv_porcao}}
     confirmado = store.aceitar_prato(prato_id, preco, res["compras"], _reservas_de(res),
-                                     confirmar_compras=bool(args.get("confirmar_compras", True)), dados=dados)
+                                     confirmar_compras=bool(args.get("confirmar_compras", True)), dados=dados,
+                                     cmv_total=res["cmv_total"], cmv_porcao=cmv_porcao)
     # As compras da receita agora são compromisso do prato: saem do carrinho para o mesmo gasto não contar duas vezes.
     baixados = store.carrinho_baixar_receita(int(receita["id"]))
-    avaliacao = costing.avaliar_preco(preco, float(cmv_porcao or 0))
+    cmv_exato = precificacao.custo_por_porcao(confirmado)
+    avaliacao = costing.avaliar_preco(preco, cmv_exato, perfil=perfil_precificacao)
     alertas: list[str] = []
     if not avaliacao["viavel"]:
-        alertas.append(f"o preço escolhido ({costing.brl(preco)}) fica abaixo do mínimo ({costing.brl(costing.preco_minimo(float(cmv_porcao or 0)))}): "
-                       f"prejuízo de {costing.brl(-avaliacao['lucro'])} por porção; confirme com ela se é isso mesmo")
+        minimo = costing.preco_minimo_centavo(cmv_exato, perfil=perfil_precificacao)
+        alertas.append(f"O preço escolhido ({costing.brl(preco)}) fica abaixo do mínimo ({costing.brl(minimo)}), "
+                       f"com perda projetada de {costing.brl(-avaliacao['lucro'])} por porção.")
     final = Store()  # visão completa (sem ignorar nada) para orçamento e reservas
     return {
         "success": True,
@@ -911,9 +1289,67 @@ def cardapio_registrar(args: dict) -> dict:
         "linhas_do_carrinho_que_viraram_compras": baixados,
         "diga_a_dona_maria": _texto_saldo(final.carrinho_resumo()),
         "alertas": alertas,
-        "nota": ("Estoque reservado e orçamento comprometido para este prato. Lembre a Dona Maria de lançar as compras reais com "
-                 "despensa_atualizar(compra=...) quando ela voltar do mercado. Para tirar o prato do cardápio: cardapio_remover."),
+        "nota": ("Estoque reservado. Se ela fizer as compras complementares deste prato, registre os valores pagos com "
+                 "despensa_registrar_compras e o compra_id correspondente." if res["compras"] else
+                 "Estoque reservado. Este prato não exige compras complementares e o saldo de compras não mudou."),
     }
+
+
+def avancar_cardapio_no_turno(store: Store, session_id: str, falas_do_turno: list[falas.Fala]) -> Optional[str]:
+    """Usa o aceite ou o preço da própria usuária para avançar a ficha já gravada."""
+    if not falas_do_turno:
+        return None
+    fala = falas_do_turno[-1]
+    pratos = store.pratos_em_andamento()
+    preco = escolhas.preco_para_registrar(fala.texto)
+    if preco is not None:
+        alvos = [p for p in pratos if escolhas.pediu_registro_do_prato(fala.texto, fala.resposta_a, p["id"], p["nome"])]
+        if len(alvos) != 1:
+            return "Ela informou um preço para registro. Pergunte qual prato deve receber esse preço."
+        prato = alvos[0]
+        registro = json.loads(cardapio_registrar({"prato_id": prato["id"], "preco_escolhido": preco}, session_id=session_id))
+        if registro["success"]:
+            return (f"Registro concluído no cardápio. Confirme o prato #{prato['id']}, {prato['nome']}, por {costing.brl(preco)} por porção. "
+                    f"{registro['diga_a_dona_maria']}. O estoque do prato foi reservado pelo registro.")
+        return "O registro ficou pendente. Explique este resultado: " + _motivo_pendente(registro)
+
+    alvos = [p for p in pratos if p["status"] != "aceito" and p.get("receita_id")
+             and precificacao.aceite_da_receita(p["id"], p["nome"], falas_do_turno)]
+    if len(alvos) != 1:
+        return None
+    prato = alvos[0]
+    if prato["status"] == "selecionado":
+        cmv = json.loads(prato_calcular_cmv({"prato_id": prato["id"]}))
+        if not cmv["success"]:
+            return "Ela já confirmou a versão. Explique a pendência que falta resolver: " + _motivo_pendente(cmv)
+    anterior = next((a for a in store.analises_preco() if a["prato_id"] == prato["id"]), None)
+    opcoes: dict[str, Any] = {"prato_id": prato["id"]}
+    if anterior:
+        dados = anterior["dados"]
+        opcoes.update(margens=[c["margem_alvo"] for c in dados["cenarios"]], nomes=[c["nome"] for c in dados["cenarios"]],
+                      cenario_recomendado=dados["cenario_recomendado"], recomendacao=dados["recomendacao"],
+                      lucro_alvo=dados.get("lucro_alvo"), custos_fixos=dados.get("custos_fixos"))
+        if dados.get("arredondar_para") is not None:
+            opcoes["arredondar_para"] = dados["arredondar_para"]
+    resultado = json.loads(preco_sugerir(opcoes, session_id=session_id))
+    if not resultado.get("analise_salva"):
+        return "Ela já confirmou a versão. Explique a pendência que falta resolver: " + _motivo_pendente(resultado)
+    precos = "; ".join(f"{c['nome']} {costing.brl(c['preco_sugerido'])} (sobra {costing.brl(c['com_preco_sugerido']['lucro'])})"
+                       for c in resultado["cenarios"])
+    return (f"Aceite já confirmado. A análise do prato #{prato['id']}, {prato['nome']}, está salva em Analytics. "
+            f"CMV por porção {costing.brl(resultado['cmv_por_porcao'])}, preço mínimo {costing.brl(resultado['preco_minimo'])}. "
+            f"Cenários por porção após os descontos considerados e o custo dos ingredientes: {precos}. "
+            + ("A projeção ainda depende da alíquota de impostos configurada em Analytics. " if resultado["taxa_impostos"] is None else "")
+            + f"Saldo atual para compras {costing.brl(store.carrinho_resumo()['saldo'])}. "
+            "Apresente esses dados e pergunte só qual preço ela escolhe para registrar no cardápio.")
+
+
+def _motivo_pendente(resultado: dict[str, Any]) -> str:
+    mensagem = resultado.get("diga_a_dona_maria")
+    if mensagem:
+        return str(mensagem)
+    motivos = [b["detalhe"] for b in resultado.get("bloqueios", [])]
+    return " ".join(motivos) if motivos else str(resultado.get("error") or "consulte o estado atual do prato")
 
 
 @_tool
@@ -930,7 +1366,7 @@ def cardapio_remover(args: dict) -> dict:
         "reservas_liberadas": out["reservas_liberadas"],
         "compras_canceladas": out["compras_canceladas"],
         "orcamento": store.orcamento(),
-        "nota": "Compra real já lançada com despensa_atualizar(compra=...) não é desfeita: o estoque e o custo continuam na despensa.",
+        "nota": "Compra real lançada com despensa_registrar_compras continua na despensa e no orçamento.",
     }
 
 
@@ -938,11 +1374,18 @@ def cardapio_remover(args: dict) -> dict:
 def cardapio_consultar(args: dict) -> dict:
     store = Store()
     pratos = store.pratos()
+    perfil_precificacao = store.perfil_precificacao()
     aceitos, em_analise, removidos = [], [], []
     for p in pratos:
         resumo = {"id": p["id"], "nome": p["nome"], "porcoes": p["porcoes"], "cmv_por_porcao": p["cmv_porcao"], "preco_venda": p["preco_venda"], "status": p["status"]}
         if p["status"] == "aceito" and p["preco_venda"]:
-            resumo["lucro_por_porcao"] = costing.avaliar_preco(p["preco_venda"], p["cmv_porcao"] or 0)["lucro"]
+            ficha = precificacao.ficha_atual(store, p)
+            if not isinstance(ficha, str):
+                porcoes, resultado = ficha
+                avaliacao = costing.avaliar_preco(p["preco_venda"], resultado["cmv_total"] / porcoes, perfil=perfil_precificacao)
+                resumo["cmv_por_porcao"] = avaliacao["cmv"]
+                resumo["lucro_por_porcao"] = avaliacao["lucro"]
+                resumo["resultado_por_porcao"] = avaliacao
             resumo["reservas"] = [{k: r[k] for k in ("ingrediente", "quantidade")} for r in store.reservas_do_prato(p["id"])]
             aceitos.append(resumo)
         elif p["status"] == "removido":
@@ -969,8 +1412,10 @@ def cardapio_consultar(args: dict) -> dict:
 def _texto_saldo(resumo: dict[str, Any]) -> str:
     """Frase pronta para a consultora repetir: o que ela tem, o que já escolheu e o que sobra."""
     partes = [f"orçamento {costing.brl(resumo['inicial'])}"]
-    if resumo["comprometido"]:
-        partes.append(f"já comprometido em pratos {costing.brl(resumo['comprometido'])}")
+    if resumo["gasto_confirmado"]:
+        partes.append(f"já pago {costing.brl(resumo['gasto_confirmado'])}")
+    if resumo["reservado_cardapio"]:
+        partes.append(f"reservado para compras de pratos {costing.brl(resumo['reservado_cardapio'])}")
     partes.append(f"no carrinho {costing.brl(resumo['carrinho'])}")
     partes.append(f"saldo {costing.brl(resumo['saldo'])}")
     return " · ".join(partes)
@@ -1120,7 +1565,8 @@ def carrinho_montar_da_receita(args: dict) -> dict:
     aval = _avaliar_prato(store, receita["dados"].get("ingredientes") or [], receita)
     if aval["veredito"] != "viavel":
         return _recusa(f"carrinho bloqueado: veredito {aval['veredito']}; só entra no carrinho o que ela consegue cozinhar, "
-                       "com equipamentos, técnicas, perfil e preços resolvidos", aval)
+                       "com equipamentos, técnicas, perfil e preços resolvidos", aval,
+                       **_aviso_prato_nao_aprovado(store, receita, aval))
     res = aval["resultado"]
     da_despensa = []
     for linha in res["itens"]:  # o que ela já tem entra no prato com o custo, sem gastar saldo
@@ -1165,7 +1611,12 @@ def salvos_salvar(args: dict) -> dict:
             "salvos": _salvos_resumo(store)}
 
 
-# ----------------------------------------------------------------------------- analytics (pratos mais vendidos)
+# ----------------------------------------------------------------------------- analytics
+@_tool
+def analytics_analises_consultar(args: dict) -> dict:
+    return {"success": True, **precificacao.consultar(Store())}
+
+
 def _contexto_mais_vendidos(r: dict[str, Any], local: str) -> str:
     """De onde vêm os números, para a frase que a consultora repete."""
     if not local:
@@ -1187,8 +1638,10 @@ def _marca_da_cozinha(m: dict[str, Any]) -> str:
 def analytics_consultar(args: dict) -> dict:
     store = Store()
     negocio = store.negocio()
-    r = analytics.consultar(negocio, str(args.get("escopo") or "prioridade"), int(_num(args.get("limite"), 8) or 8), args.get("categoria"))
-    cozinha.anotar_ranking(r["ranking"], store.perfil())
+    perfil_precificacao = store.perfil_precificacao()
+    r = analytics.consultar(negocio, str(args.get("escopo") or "prioridade"), int(_num(args.get("limite"), 8) or 8),
+                           args.get("categoria"))
+    cozinha.anotar_ranking(r["ranking"], store.perfil(), perfil_precificacao=perfil_precificacao)
     ranking = []
     for m in r["ranking"]:
         item = {"posicao": m["posicao"], "prato": m["prato"], "categoria": m["categoria"], "preco_medio": m["preco_medio"],
@@ -1225,9 +1678,10 @@ def analytics_consultar(args: dict) -> dict:
             f"{m['posicao']}) {m['prato']} (~{costing.brl(m['preco_medio'])}"
             + (f"; cobrar a partir de {costing.brl(m['preco']['preco_minimo'])}" if m.get("preco") else "") + ")" + _marca_da_cozinha(m)
             for m in r["ranking"][:5])
-        resposta["diga_a_dona_maria"] = (f"Mais vendidos ({_contexto_mais_vendidos(r, local)}; base de exemplo, dados ilustrativos, "
-                                         f"não são vendas reais): {lista}. \"Cobrar a partir de\" é o preço sem prejuízo depois da taxa de 10% "
-                                         "(custo típico de exemplo ÷ 0,90): com o custo real dela o número muda.")
+        resposta["diga_a_dona_maria"] = (f"Mais vendidos ({_contexto_mais_vendidos(r, local)}; base de exemplo, dados ilustrativos): "
+                                         f"{lista}. \"Cobrar a partir de\" cobre o custo de exemplo após os descontos configurados em Analytics. "
+                                         + ("A projeção ainda depende da alíquota de impostos. " if perfil_precificacao["imposto"] is None else "")
+                                         + "Com o custo real da receita o preço muda.")
     return resposta
 
 
@@ -1256,7 +1710,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "name": "despensa_listar",
         "description": "Lista a despensa da Dona Maria (planilha despensa_dona_maria.xlsx): estoque, unidade normalizada (kg/L/un), custo unitário (preço pago ÷ quantidade comprada), preço pago e o orçamento restante para compras. É a ÚNICA fonte para 'quanto custa', 'quanto tem' ou 'tem na despensa?' de qualquer ingrediente: nunca use web_search para isso. Use no início da conversa e sempre que precisar de custos.",
         "parameters": {"type": "object", "properties": {
-            "filtro": {"type": "string", "description": "Opcional: trecho do nome para filtrar (ex.: 'queijo')"},
+            "filtro": {"type": "string", "description": "Opcional: trecho do nome para filtrar (ex.: 'queijo'); vários separados por vírgula (ex.: 'frango, batata') trazem os que casam com qualquer um"},
             "recarregar": {"type": "boolean", "description": "Opcional: true recarrega a planilha do zero (descarta ajustes feitos na despensa)"},
         }},
     },
@@ -1269,13 +1723,28 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "despensa_atualizar": {
         "name": "despensa_atualizar",
-        "description": "Ajusta um item da despensa: registra o conteúdo de 1 unidade (ex.: cobertura de chocolate = 1,01 kg) para itens vendidos por 'un', ou lança uma compra (quantidade, unidade, preço total) que entra no estoque e recalcula o custo unitário. Use 'novo': true para cadastrar ingrediente que não existia.",
+        "description": "Registra apenas o conteúdo de uma embalagem de um item que já existe, quando ela disser a medida. Exemplo: um pote de cobertura de chocolate tem 1,01 kg. Para compras use despensa_registrar_compras.",
         "parameters": {"type": "object", "properties": {
-            "ingrediente": {"type": "string", "description": "Nome do item (como na despensa, ou novo)"},
-            "conteudo_por_unidade": {"type": "object", "properties": {"quantidade": {"type": "number"}, "unidade": {"type": "string", "description": "g, kg, ml ou L"}}, "description": "Quanto tem em 1 unidade"},
-            "compra": {"type": "object", "properties": {"quantidade": {"type": "number"}, "unidade": {"type": "string"}, "preco_total": {"type": "number"}}, "description": "Compra realizada a lançar no estoque"},
-            "novo": {"type": "boolean", "description": "true para cadastrar ingrediente novo junto com a compra"},
-        }, "required": ["ingrediente"]},
+            "ingrediente": {"type": "string", "description": "Nome do item como está na despensa"},
+            "conteudo_por_unidade": {"type": "object", "properties": {"quantidade": {"type": "number"}, "unidade": {"type": "string", "description": "g, kg, ml ou L"}},
+                                     "required": ["quantidade", "unidade"], "description": "Quanto tem em uma embalagem"},
+        }, "required": ["ingrediente", "conteudo_por_unidade"]},
+    },
+    "despensa_registrar_compras": {
+        "name": "despensa_registrar_compras",
+        "description": ("Dá entrada de compras confirmadas na despensa e abate o orçamento em uma chamada. Cadastra ingredientes novos automaticamente. "
+                        "Depois de mostrar compras_para_confirmar da conferência, use apenas receita_id quando ela pedir o lançamento no estoque. "
+                        "Para compras avulsas que ela informou, use compras com os dados da fala atual. Não passe ingredientes já disponíveis da receita. "
+                        "Use diga_a_dona_maria para informar a gravação e o saldo real."),
+        "parameters": {"type": "object", "properties": {
+            "receita_id": {"type": "integer", "description": "Id da conferência cuja lista de compras foi mostrada e aprovada"},
+            "compras": {"type": "array", "items": {"type": "object", "properties": {
+                "nome": {"type": "string"}, "quantidade": {"type": "number"}, "unidade": {"type": "string"},
+                "preco_total": {"type": "number", "description": "Valor total pago pelo item, em reais"},
+                "compra_id": {"type": "integer", "description": "Id de compromisso de compra existente, se for a mesma compra"},
+                "carrinho_id": {"type": "integer", "description": "Id do item no carrinho, se for a mesma compra"},
+            }, "required": ["nome", "quantidade", "unidade", "preco_total"], "additionalProperties": False}},
+        }, "additionalProperties": False},
     },
     "perfil_cozinha_consultar": {
         "name": "perfil_cozinha_consultar",
@@ -1291,10 +1760,30 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "restricoes": {"type": "object", "description": "só restrições que ela contou: espaco_geladeira, tempo_por_cozinhada_min, gas, energia...", "additionalProperties": True},
         }},
     },
+    "negocio_salvar": {
+        "name": "negocio_salvar",
+        "description": "Salva SÓ o que a Dona Maria disse do negócio dela: onde a loja fica (estado, cidade e zona da cidade), o tipo de negócio e o tipo de alimentação que ela faz. A tool confere cada item com as falas dela e recusa (campo 'recusados') o que ela não falou: se ela não falou, não envie, pergunte. Faz merge com o que já está salvo; ela vê e corrige tudo na tela Meu negócio. Os pratos e a cozinha dela NÃO vão aqui (use perfil_cozinha_salvar).",
+        "parameters": {"type": "object", "properties": {
+            "estado": {"type": "string", "description": "o estado onde a loja fica: o nome (ou a sigla) que ela disse"},
+            "cidade": {"type": "string", "description": "a cidade onde a loja fica, como ela disse"},
+            "zona": {"type": "string", "enum": list(negocio_mod.ZONAS), "description": "a zona da cidade, se ela disse"},
+            "tipo": {"type": "string", "enum": list(negocio_mod.TIPOS), "description": "o tipo de negócio que ela disse"},
+            "alimentacao": {"type": "array", "items": {"type": "string", "enum": list(negocio_mod.ALIMENTACAO)},
+                            "description": "o tipo de alimentação que ela faz (pode ser mais de um), só o que ela disse"},
+        }},
+    },
+    "pratos_selecionar": {
+        "name": "pratos_selecionar",
+        "description": "Guarda os pratos que ela acabou de escolher em Minha cozinha > Pratos, como rascunhos a montar. A escolha não requer preço, ficha, carrinho ou aprovação. Informe só os nomes que ela escolheu; se ela indicou números da última lista, a ferramenta resolve a lista mostrada.",
+        "parameters": {"type": "object", "properties": {
+            "nomes": {"type": "array", "items": {"type": "string"}, "description": "nomes escolhidos quando ela informou por nome"},
+        }},
+    },
     "receita_conferir_ingredientes": {
         "name": "receita_conferir_ingredientes",
-        "description": "Etapa 2.3: compara os ingredientes de uma receita com a despensa e diz o que ela já tem (e quanto), o que falta comprar, custo estimado e se cabe no orçamento restante. Também confere equipamentos e técnicas necessários contra o perfil salvo e devolve um veredito (viavel / precisa_confirmar / inviavel_por_enquanto) com os próximos passos. Salva a receita como candidata.",
+        "description": "Confere quantidades da receita contra despensa, cozinha e orçamento. Passe prato_id ou o nome da receita. Use diga_a_dona_maria para o custo e o saldo, que são distintos. Confira apenas as quantidades que a receita usa. Quando houver impedimento, apresente o motivo e aguarde confirmação antes de trocar.",
         "parameters": {"type": "object", "properties": {
+            "prato_id": {"type": "integer", "description": "id do prato escolhido que esta conferência está montando, se houver"},
             "nome": {"type": "string", "description": "Nome da receita"},
             "fonte_url": {"type": "string", "description": "URL de onde a receita foi tirada"},
             "porcoes": {"type": "number", "description": "Quantas porções a receita rende"},
@@ -1302,28 +1791,33 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "equipamentos_necessarios": {"type": "array", "items": {"type": "string"}, "description": "ex.: ['forno', 'panela de pressão', 'liquidificador']"},
             "tecnicas_necessarias": {"type": "array", "items": {"type": "string"}, "description": "ex.: ['massa fresca', 'molho branco', 'ponto da carne']"},
             "tempo_preparo_min": {"type": "number", "description": "Tempo total de preparo em minutos, se a receita informar"},
-        }, "required": ["nome", "ingredientes"]},
+        }, "required": ["ingredientes"]},
     },
     "prato_calcular_cmv": {
         "name": "prato_calcular_cmv",
         "description": "Etapa 2.4: calcula o CMV do prato (Σ quantidade usada × custo unitário, custo unitário = preço pago ÷ quantidade comprada, incluindo compras complementares), o CMV por porção e a memória de cálculo linha a linha. Exige uma receita conferida (receita_id) e reavalia perfil da cozinha, despensa disponível e orçamento: com qualquer pendência devolve bloqueado=true com 'bloqueios' e 'proximos_passos' em vez do CMV. Resolva-os (clarify + perfil_cozinha_salvar, despensa_atualizar) e chame de novo com o mesmo receita_id.",
         "parameters": {"type": "object", "properties": {
-            "receita_id": {"type": "integer", "description": "id devolvido por receita_conferir_ingredientes (obrigatório)"},
+            "prato_id": {"type": "integer", "description": "id do prato escolhido vinculado à conferência, se houver"},
+            "receita_id": {"type": "integer", "description": "id devolvido pela conferência; pode usar prato_id quando já houver ficha vinculada"},
             "nome": {"type": "string", "description": "Opcional: nome do prato (padrão: nome da receita)"},
             "porcoes": {"type": "number", "description": "Opcional: porções que a receita rende (padrão: porções da receita conferida)"},
             "ingredientes": _ING_SCHEMA,
-        }, "required": ["receita_id"]},
+        }},
     },
     "preco_sugerir": {
         "name": "preco_sugerir",
-        "description": "Monta o preço de venda no delivery com taxa de 10% sobre a venda (Dona Maria recebe 0,90×P): preço mínimo (CMV÷0,90), 2–3 cenários de margem com a conta aberta e, se pedido, a simulação de preços que ela sugerir. Exige prato_id de prato_calcular_cmv: o CMV calculado pela tool é o que vale. Apresente os cenários e deixe ELA decidir.",
+        "description": "Usa o CMV e as taxas configuradas em Analytics para sugerir preços. A ferramenta lê o aceite direto da conversa e salva a análise no Analytics depois da confirmação. Se o painel já trouxer a análise salva, use os cenários atualizados do painel. Quando impostos estiverem pendentes, apresente a projeção como provisória. Pergunte qual preço ela quer adotar para registrar o prato.",
         "parameters": {"type": "object", "properties": {
             "prato_id": {"type": "integer", "description": "id do prato devolvido por prato_calcular_cmv (obrigatório)"},
-            "cmv_por_porcao": {"type": "number", "description": "Opcional: ignorado se diferir do CMV calculado para o prato"},
-            "taxa_plataforma": {"type": "number", "description": "Taxa da plataforma (padrão 0.10)"},
-            "margens": {"type": "array", "items": {"type": "number"}, "description": "Opcional: margens-alvo sobre o valor recebido, ex.: [0.3, 0.5, 0.65]"},
+            "aceite_prato": {"type": "string", "description": "Opcional. O aceite é validado pelo que ela disse na conversa."},
+            "margens": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}, "description": "Escolha 2–3 margens-alvo distintas, da menor para a maior, como frações do recebido depois da taxa, por exemplo [0.20, 0.30]."},
+            "nomes": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "string", "maxLength": 50}, "description": "Um nome distinto para cada cenário, na ordem das margens."},
+            "cenario_recomendado": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Posição do cenário que você recomenda, começando em 1."},
+            "recomendacao": {"type": "string", "maxLength": 280, "description": "Justifique a recomendação em uma frase com base no prato e no plano da loja, sem inventar dados ou calcular valores à mão."},
+            "lucro_alvo": {"type": "number", "minimum": 0, "description": "Opcional: meta de lucro em R$, quando ela informar. Use o mesmo período dos custos fixos."},
+            "custos_fixos": {"type": "number", "minimum": 0, "description": "Opcional: custos fixos confirmados em R$ no período da meta dela."},
             "precos_para_simular": {"type": "array", "items": {"type": "number"}, "description": "Opcional: preços que a Dona Maria quer testar, ex.: [25, 29.9]"},
-            "arredondar_para": {"type": "number", "description": "Arredondamento do preço sugerido (padrão 0.50)"},
+            "arredondar_para": {"type": "number", "minimum": 0.01, "description": "Arredondamento para cima em R$ (padrão 0.50)."},
         }, "required": ["prato_id"]},
     },
     "cardapio_registrar": {
@@ -1337,7 +1831,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "cardapio_remover": {
         "name": "cardapio_remover",
-        "description": "Tira um prato do cardápio (ela desistiu, mudou de ideia, ou o prato precisa ser refeito): libera o estoque que estava reservado para ele e cancela as compras comprometidas, devolvendo o valor ao orçamento. Compra real já lançada com despensa_atualizar não é desfeita.",
+        "description": "Tira um prato do cardápio: libera o estoque reservado e devolve ao saldo os compromissos de compra do prato. Compras já pagas e registradas na despensa continuam contabilizadas.",
         "parameters": {"type": "object", "properties": {
             "prato_id": {"type": "integer", "description": "id do prato (ver cardapio_consultar)"},
             "motivo": {"type": "string", "description": "Opcional: por que saiu (ex.: 'ela preferiu o estrogonofe')"},
@@ -1411,14 +1905,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "unidade": {"type": "string", "description": "Só ingrediente: kg, g, L, ml, un..."},
         }, "required": ["tipo", "nome"]},
     },
-    "analytics_consultar": {
-        "name": "analytics_consultar",
-        "description": "Pratos mais vendidos, com preço médio e ingredientes típicos, da base de conhecimento (dados de EXEMPLO, não são vendas reais). Por padrão vem priorizado pelo lugar da loja (zona, cidade, estado, região, país: o mais local pesa mais). Cada prato traz cozinha_dela (ok, confirmar, atencao ou nao_da: se a cozinha dela faz) e quanto_cobrar (preço mínimo sem prejuízo depois da taxa de 10% e por margem, com custo típico de exemplo). Use para sugerir pratos antes de montar o carrinho, sem oferecer um prato nao_da, e diga que é a base de exemplo.",
-        "parameters": {"type": "object", "properties": {
-            "escopo": {"type": "string", "enum": ["prioridade", "zona", "cidade", "estado", "regiao", "pais"], "description": "prioridade (padrão) junta todos os níveis; os outros mostram só aquele nível"},
-            "limite": {"type": "integer", "description": "Quantos pratos (padrão 8)"},
-            "categoria": {"type": "string", "description": "Opcional: prato do dia, marmita, lanche, salgado, pizza, massas, sobremesa, peixes, saudável, japonesa"},
-        }},
+    "analytics_analises_consultar": {
+        "name": "analytics_analises_consultar",
+        "description": "Recupera as análises de preço que a consultora já salvou no Analytics para os pratos aceitos pela Dona Maria. Inclui a recomendação, os cenários calculados e o preço registrado, quando ela escolheu.",
+        "parameters": {"type": "object", "properties": {}},
     },
 }
 
@@ -1426,8 +1916,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "despensa_listar": despensa_listar,
     "despensa_buscar": despensa_buscar,
     "despensa_atualizar": despensa_atualizar,
+    "despensa_registrar_compras": despensa_registrar_compras,
     "perfil_cozinha_consultar": perfil_cozinha_consultar,
     "perfil_cozinha_salvar": perfil_cozinha_salvar,
+    "negocio_salvar": negocio_salvar,
+    "pratos_selecionar": pratos_selecionar,
     "receita_conferir_ingredientes": receita_conferir_ingredientes,
     "prato_calcular_cmv": prato_calcular_cmv,
     "preco_sugerir": preco_sugerir,
@@ -1440,5 +1933,5 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "carrinho_remover": carrinho_remover,
     "carrinho_montar_da_receita": carrinho_montar_da_receita,
     "salvos_salvar": salvos_salvar,
-    "analytics_consultar": analytics_consultar,
+    "analytics_analises_consultar": analytics_analises_consultar,
 }

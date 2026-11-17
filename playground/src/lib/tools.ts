@@ -1,12 +1,15 @@
-import type { ToolStatus, ToolTrace } from "../types";
+import type { Conversation, ToolResult, ToolStatus, ToolTrace } from "../types";
 
 const LABELS: Record<string, string> = {
   despensa_listar: "Abrindo a despensa",
-  despensa_buscar: "Procurando na despensa",
+  despensa_buscar: "Conferindo a despensa",
   despensa_atualizar: "Anotando na despensa",
+  despensa_registrar_compras: "Registrando as compras na despensa",
   perfil_cozinha_consultar: "Vendo o que a cozinha tem",
   perfil_cozinha_salvar: "Guardando o que você contou",
-  receita_conferir_ingredientes: "Conferindo os ingredientes",
+  negocio_salvar: "Guardando o seu negócio",
+  pratos_selecionar: "Salvando os pratos escolhidos",
+  receita_conferir_ingredientes: "Comparando com a despensa e o orçamento",
   prato_calcular_cmv: "Calculando o CMV",
   preco_sugerir: "Montando os preços",
   cardapio_registrar: "Registrando no cardápio",
@@ -18,9 +21,10 @@ const LABELS: Record<string, string> = {
   carrinho_remover: "Tirando do carrinho",
   carrinho_montar_da_receita: "Montando o carrinho da receita",
   salvos_salvar: "Salvando em Meus pratos",
-  analytics_consultar: "Vendo os mais vendidos",
-  web_search: "Pesquisando receitas",
+  analytics_analises_consultar: "Consultando as análises salvas",
+  web_search: "Pesquisando na internet",
   web_extract: "Lendo a receita",
+  clarify: "Perguntando a ela",
   memory: "Guardando na memória",
   skill_view: "Abrindo o playbook",
   skills_list: "Listando os playbooks",
@@ -29,64 +33,6 @@ const LABELS: Record<string, string> = {
   todo_list: "Anotando o próximo passo",
   todo_write: "Anotando o próximo passo",
 };
-
-export type Stage = {
-  id: string;
-  title: string;
-  hint: string;
-  test: (name: string) => boolean;
-};
-
-export const STAGES: Stage[] = [
-  {
-    id: "despensa",
-    title: "Despensa",
-    hint: "o que ela tem e quanto pagou",
-    test: (name) => name.startsWith("despensa_"),
-  },
-  {
-    id: "mais-vendidos",
-    title: "Mais vendidos",
-    hint: "o que vende na sua zona e cidade",
-    test: (name) => name === "analytics_consultar",
-  },
-  {
-    id: "receitas",
-    title: "Receitas",
-    hint: "pesquisa na web e leitura da página",
-    test: (name) => name.startsWith("web_"),
-  },
-  {
-    id: "cozinha",
-    title: "Cozinha",
-    hint: "equipamentos, técnicas e tempo",
-    test: (name) => name.startsWith("perfil_"),
-  },
-  {
-    id: "ingredientes",
-    title: "Ingredientes",
-    hint: "o que tem, o que falta e se cabe nos R$ 80",
-    test: (name) => name === "receita_conferir_ingredientes",
-  },
-  {
-    id: "carrinho",
-    title: "Carrinho",
-    hint: "o prato aberto, ingrediente por ingrediente, dentro do saldo",
-    test: (name) => name.startsWith("carrinho_") || name === "salvos_salvar",
-  },
-  {
-    id: "preco",
-    title: "CMV e preço",
-    hint: "conta aberta — ela escolhe",
-    test: (name) => name === "prato_calcular_cmv" || name === "preco_sugerir",
-  },
-  {
-    id: "cardapio",
-    title: "Cardápio",
-    hint: "o registro reserva estoque e orçamento",
-    test: (name) => name.startsWith("cardapio_"),
-  },
-];
 
 export function canonicalToolName(name: string): string {
   const trimmed = name.trim();
@@ -133,33 +79,54 @@ export function parseToolEvent(raw: unknown, seq: number): ToolTrace | null {
   const status: ToolStatus = failed ? "error" : done ? "done" : "running";
   const explicit = asString(flat.toolCallId ?? flat.tool_call_id ?? flat.call_id ?? (nested ? undefined : flat.id));
 
+  const now = Date.now();
   return {
     id: explicit || `anon-${seq}-${name}-${status}`,
     name,
     label: toolLabel(name),
     status,
     preview: friendlyPreview(flat.preview ?? flat.output ?? flat.delta ?? flat.arguments),
+    detail: detailFrom(name, asString(flat.label)),
+    startedAt: status === "running" ? now : undefined,
+    endedAt: status === "running" ? undefined : now,
+  };
+}
+
+function hostOf(text: string): string | undefined {
+  try {
+    return new URL(text).hostname.replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+/** O Hermes manda em `label` o argumento principal da ferramenta (a busca digitada, o endereço lido). Quando é só o nome da ferramenta, não diz nada. */
+function detailFrom(name: string, label: string | undefined): string | undefined {
+  if (!label || label === name) return undefined;
+  const text = label.replace(/\s+/g, " ").trim();
+  return name === "web_extract" ? (hostOf(text) ?? friendlyPreview(text)) : friendlyPreview(text);
+}
+
+function mergeTool(old: ToolTrace, incoming: ToolTrace): ToolTrace {
+  return {
+    ...old,
+    status: incoming.status,
+    label: incoming.label,
+    preview: incoming.preview ?? old.preview,
+    detail: incoming.detail ?? old.detail,
+    startedAt: old.startedAt ?? incoming.startedAt,
+    endedAt: incoming.status === "running" ? old.endedAt : (incoming.endedAt ?? old.endedAt),
   };
 }
 
 export function applyTool(tools: ToolTrace[], incoming: ToolTrace): ToolTrace[] {
   const byId = tools.findIndex((tool) => tool.id === incoming.id);
-  if (byId >= 0) {
-    return tools.map((tool, index) =>
-      index === byId
-        ? { ...tool, status: incoming.status, label: incoming.label, preview: incoming.preview ?? tool.preview }
-        : tool,
-    );
-  }
+  if (byId >= 0) return tools.map((tool, index) => (index === byId ? mergeTool(tool, incoming) : tool));
   if (incoming.status !== "running") {
     for (let index = tools.length - 1; index >= 0; index -= 1) {
       const tool = tools[index];
       if (tool.name === incoming.name && tool.status === "running") {
-        return tools.map((item, itemIndex) =>
-          itemIndex === index
-            ? { ...item, status: incoming.status, preview: incoming.preview ?? item.preview }
-            : item,
-        );
+        return tools.map((item, itemIndex) => (itemIndex === index ? mergeTool(item, incoming) : item));
       }
     }
   }
@@ -167,11 +134,66 @@ export function applyTool(tools: ToolTrace[], incoming: ToolTrace): ToolTrace[] 
 }
 
 export function settleTools(tools: ToolTrace[], status: ToolStatus): ToolTrace[] {
-  return tools.map((tool) => (tool.status === "running" ? { ...tool, status } : tool));
+  const now = Date.now();
+  return tools.map((tool) => (tool.status === "running" ? { ...tool, status, endedAt: tool.endedAt ?? now } : tool));
 }
 
-export function stageStatus(names: string[], runningNames: string[], stage: Stage): "idle" | "now" | "done" {
-  if (runningNames.some(stage.test)) return "now";
-  if (names.some(stage.test)) return "done";
-  return "idle";
+/** O texto que o plugin põe no começo do resumo quando uma trava (cozinha incompleta, saldo) recusou o pedido: não é falha, é a regra trabalhando. */
+export const PREFIXO_TRAVA = "Travado: ";
+
+/** Junta aos passos da conversa o que cada ferramenta fez (a frase que o plugin guardou). Devolve o mesmo array se nada mudou. */
+export function applyResults(conversations: Conversation[], found: Record<string, ToolResult>): Conversation[] {
+  let changed = false;
+  const next = conversations.map((conversation) => {
+    let touched = false;
+    const messages = conversation.messages.map((message) => {
+      if (!message.tools.some((tool) => found[tool.id] && !tool.result)) return message;
+      touched = true;
+      return {
+        ...message,
+        tools: message.tools.map((tool) => (found[tool.id] && !tool.result ? { ...tool, result: found[tool.id] } : tool)),
+      };
+    });
+    if (!touched) return conversation;
+    changed = true;
+    return { ...conversation, messages };
+  });
+  return changed ? next : conversations;
+}
+
+export type StepView = {
+  id: string;
+  status: ToolStatus;
+  tone: "running" | "done" | "error" | "locked";
+  title: string;
+  detail?: string;
+  summary?: string;
+  items: string[];
+  ms?: number;
+};
+
+/** O que mostrar de um passo: enquanto roda, o verbo no gerúndio e o que está sendo feito; depois, o que ela fez e achou. */
+export function describeStep(tool: ToolTrace): StepView {
+  const result = tool.result;
+  const locked = result?.ok !== false && !!result?.resumo.startsWith(PREFIXO_TRAVA);
+  const failed = tool.status === "error" || result?.ok === false;
+  let title = result?.titulo ?? tool.label;
+  if (tool.status === "running") {
+    title = tool.label;
+  } else if (failed || locked) {
+    if (tool.name === "despensa_atualizar") title = "Não atualizou a despensa";
+    else if (tool.name === "despensa_registrar_compras") title = "Compra não registrada";
+    else title = failed ? "Não concluiu a etapa" : "Etapa pendente";
+  }
+  const ms = result?.duracao_ms ?? (tool.startedAt && tool.endedAt ? tool.endedAt - tool.startedAt : undefined);
+  return {
+    id: tool.id,
+    status: tool.status,
+    tone: tool.status === "running" ? "running" : failed ? "error" : locked ? "locked" : "done",
+    title,
+    detail: result?.entrada || tool.detail || tool.preview,
+    summary: result?.resumo || undefined,
+    items: result?.itens ?? [],
+    ms: tool.status === "running" ? undefined : ms,
+  };
 }

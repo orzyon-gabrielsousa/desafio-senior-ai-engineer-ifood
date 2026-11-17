@@ -38,7 +38,7 @@ Os avisos de **ingrediente** funcionam igual: se ela quer comprar *massa de pizz
 - **Prato** é o nome exato do Analytics (`pratos-mais-vendidos/`). A conferência acha o prato com ou sem o parêntese ("Coxinha de frango" vale para "Coxinha de frango (porção com 6)") e, se o nome for único entre os pratos, também por parte dele.
 - **Precisa de** separa as exigências por vírgula; `A ou B` quer dizer que um dos dois basta (`fogão, panela de pressão ou panela grande`). Use `-` quando o prato não pede equipamento.
 - **Habilidades** separa por vírgula, com os nomes da tabela abaixo.
-- **Custo típico** é o custo dos ingredientes por porção. É com ele que o Analytics mostra **quanto cobrar** (custo ÷ 0,90 para não perder, mais a margem que ela quer).
+- **Custo típico** é uma referência do custo dos ingredientes por porção nas fichas de exemplo. Para precificar receitas da loja, o Analytics usa os custos atuais da ficha e os descontos configurados no perfil de precificação.
 - As categorias (`## Pizza`) são só títulos.
 
 ### `ingredientes.md`

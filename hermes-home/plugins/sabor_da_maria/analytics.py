@@ -1,4 +1,4 @@
-"""Analytics: pratos mais vendidos por zona, cidade, estado, região e país, para a consultora e para a tela.
+"""Leitor legado de rankings ilustrativos e catálogo de nomes usado pelo carrinho.
 
 Os dados moram em Markdown na base de conhecimento do repositório,
 ``prompts/base-de-conhecimento/pratos-mais-vendidos/``: um arquivo por estado (com as cidades e zonas dentro),
@@ -9,8 +9,8 @@ Os pratos são **priorizados pelo lugar da loja**: o que vende na zona dela pesa
 cidade, que pesa mais que o do estado, da região e do país (``PESOS``). Sem localização informada em
 "Meu negócio", vale só o ranking do país.
 
-Os dados da pasta são de exemplo, criados para a demonstração do desafio: não são vendas reais. O texto
-devolvido ao modelo e à tela diz isso, para a consultora não apresentar como estatística real.
+O guia de evidências publicadas é separado e lido por ``guias.py``. Os rankings de exemplo
+ficam fora do contexto da consultora e do Analytics atual.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from . import cozinha
 from . import negocio as negocio_mod
 from .units import norm_text
 
@@ -167,7 +166,8 @@ def carregar(pasta: Optional[Path] = None) -> list[Secao]:
     pasta = pasta or raiz()
     if pasta is None:
         return []
-    arquivos = sorted(p for p in pasta.rglob("*.md") if p.name.lower() != "readme.md")
+    arquivos = sorted(p for p in pasta.rglob("*.md")
+                      if p.name.lower() != "readme.md" and p.relative_to(pasta).parts[0] != "evidencias")
     assinatura = tuple(p.stat().st_mtime_ns for p in arquivos) + (len(arquivos),)
     with _LOCK:
         em_cache = _CACHE.get(str(pasta))
@@ -283,25 +283,3 @@ def e_prato(nome: str) -> bool:
     """O nome é exatamente o de um prato da base? Igualdade, não prefixo: 'arroz' é ingrediente, 'Arroz carreteiro' é prato."""
     n = norm_text(nome)
     return bool(n) and n in nomes_de_pratos()
-
-
-def topo_para_painel(negocio: Optional[dict[str, Any]], quantos: int = 3, perfil: Optional[dict[str, Any]] = None) -> str:
-    """Linha curta para o painel do turno: os mais vendidos para a loja, com preço médio e, com a cozinha dela (``perfil``),
-    a marca dos que ela não consegue fazer."""
-    try:
-        r = consultar(negocio, "prioridade", quantos)
-    except Exception:  # noqa: BLE001 - sem o Analytics a consultora ainda tem as tools
-        logger.exception("analytics: não consegui montar o topo do painel")
-        return ""
-    if not r["ranking"]:
-        return ""
-    onde = r["escopos_disponiveis"][0]["onde"] if r["escopos_disponiveis"] else "Brasil"
-    def marca(m: dict[str, Any]) -> str:
-        if perfil is None:
-            return ""
-        c = cozinha.conferir(m["prato"], [], perfil)
-        return " [NÃO dá na cozinha dela: " + "; ".join(f["precisa"] for f in c["falta"]) + "]" if c["status"] == "nao_da" else ""
-
-    itens = "; ".join(f"{m['posicao']}) {m['prato']} (~R$ {m['preco_medio']:.2f})".replace(".", ",") + marca(m) for m in r["ranking"])
-    base = "prioridade pelo local da loja" if r["local_definido"] else "só país: loja sem localização"
-    return f"Mais vendidos ({base}; {onde}; dados de exemplo): {itens}."

@@ -1,10 +1,12 @@
 """Carrinho com saldo, perfil do negócio e a API que a tela usa: tudo no mesmo SQLite das tools."""
 
 import json
+import os
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 from sabor_da_maria import api, negocio, tools
 from sabor_da_maria.store import OrcamentoEstourado, Store
@@ -19,7 +21,8 @@ def call(name, **args):
 class CarrinhoStoreTests(StoreTestCase):
     def test_saldo_acompanha_o_carrinho(self):
         store = Store()
-        self.assertEqual(store.carrinho_resumo(), {"inicial": 80.0, "comprometido": 0.0, "carrinho": 0.0, "saldo": 80.0, "estourou": False})
+        self.assertEqual(store.carrinho_resumo(), {"inicial": 80.0, "comprometido": 0.0, "gasto_confirmado": 0.0,
+                                                  "reservado_cardapio": 0.0, "carrinho": 0.0, "saldo": 80.0, "estourou": False})
         item = store.carrinho_adicionar("Couve", 12, 1, "maço")
         self.assertEqual((item["nome"], item["preco_total"], item["estimado"]), ("Couve", 12.0, False))
         resumo = store.carrinho_resumo()
@@ -101,17 +104,38 @@ class NegocioTests(StoreTestCase):
     def test_salvar_e_ler(self):
         store = Store()
         self.assertIsNone(store.negocio())
-        salvo = store.negocio_salvar({"tipo": "restaurante_hotel", "vende": ["prato_do_dia", "bolos", "pizzas", "bolos"],
-                                      "publico": "  hóspedes   do hotel ", "observacoes": "almoço executivo"})
-        self.assertEqual(salvo["vende"], ["prato_do_dia", "bolos", "pizzas"])
-        self.assertEqual(salvo["publico"], "hóspedes do hotel")
+        salvo = store.negocio_salvar({"tipo": "restaurante_hotel", "alimentacao": ["caseira", "doces", "pizza", "doces"],
+                                      "estado": "sp", "cidade": "  São   Paulo ", "zona": "sul"})
+        self.assertEqual(salvo["alimentacao"], ["caseira", "doces", "pizza"])
+        self.assertEqual((salvo["pais"], salvo["estado"], salvo["cidade"], salvo["zona"]), ("Brasil", "SP", "São Paulo", "sul"))
         self.assertEqual(Store().negocio()["tipo"], "restaurante_hotel")
         frase = negocio.descrever(store.negocio())
         self.assertIn("Restaurante de hotel", frase)
-        self.assertIn("Bolos e doces", frase)
+        self.assertIn("Doces e sobremesas", frase)
+        self.assertIn("local: Zona Sul, São Paulo/SP", frase)
+
+    def test_nenhum_campo_e_obrigatorio_e_perfil_antigo_continua_legivel(self):
+        store = Store()
+        self.assertEqual(store.negocio_salvar({})["tipo"], "")  # ela pode preencher aos poucos
+        # o que um perfil de antes guardava (o que vende, para quem, observações) não aparece mais; o resto continua valendo
+        with store.connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO config(chave, valor) VALUES('negocio', ?)",
+                         ('{"tipo": "marmitaria", "vende": ["marmitas"], "publico": "hóspedes", "observacoes": "x", "estado": "MG", "cidade": "Uberlândia", "zona": ""}',))
+        lido = Store().negocio()
+        self.assertEqual((lido["tipo"], lido["estado"], lido["cidade"], lido["alimentacao"], lido["pais"]), ("marmitaria", "MG", "Uberlândia", [], "Brasil"))
+        self.assertNotIn("vende", lido)
+        self.assertNotIn("publico", lido)
+
+    def test_conversa_so_muda_o_que_vier_e_soma_a_alimentacao(self):
+        store = Store()
+        store.negocio_atualizar({"estado": "SP", "cidade": "Campinas"})
+        store.negocio_atualizar({"tipo": "marmitaria", "alimentacao": ["marmita"]})
+        salvo = store.negocio_atualizar({"alimentacao": ["pizza", "marmita"], "zona": "leste"})
+        self.assertEqual((salvo["estado"], salvo["cidade"], salvo["tipo"], salvo["zona"], salvo["alimentacao"]), ("SP", "Campinas", "marmitaria", "leste", ["marmita", "pizza"]))
+        self.assertEqual(Store().negocio_salvar({"estado": "RJ"})["alimentacao"], [])  # a tela manda o formulário inteiro: substitui
 
     def test_opcoes_fechadas(self):
-        for invalido in ({"tipo": "banca"}, {"tipo": "restaurante", "vende": ["sushi"]}, {"tipo": "restaurante", "vende": "bolos"}, "texto"):
+        for invalido in ({"tipo": "banca"}, {"alimentacao": ["sushi"]}, {"alimentacao": "pizza"}, {"pais": "Portugal"}, {"estado": "XX"}, {"zona": "nordeste"}, "texto"):
             with self.assertRaises(ValueError, msg=invalido):
                 negocio.normalizar(invalido)
         self.assertIn("ainda não preencheu", negocio.descrever(None))
@@ -215,6 +239,41 @@ class ApiTests(StoreTestCase):
         self.assertIsNone(dados["negocio"])
         self.assertIn("restaurante_hotel", [t["id"] for t in dados["opcoes"]["tipos"]])
 
+    def test_cadastro_guiado_grava_respostas_parciais_e_distingue_negativa_de_nao_respondida(self):
+        Store().perfil_salvar({"equipamentos": {"forno_eletrico": True, "fogao_bocas": 4}})
+        status, dados = api.tratar("PUT", "/api/cozinha", {
+            "equipamentos": {"forno": None, "panela_pressao": False},
+            "habilidades": {"assar": "aprendendo"},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(dados["cozinha"]["equipamentos"], {"fogao": 4, "panela_pressao": False})
+        self.assertEqual(dados["cozinha"]["habilidades"], {"assar": "aprendendo"})
+        self.assertTrue(dados["cadastro"]["cozinha_pendente"])
+        self.assertIn("forno", dados["cadastro"]["cozinha_campos"])
+        self.assertNotIn("panela_pressao", dados["cadastro"]["cozinha_campos"])
+        self.assertEqual(Store().cozinha()["equipamentos"], dados["cozinha"]["equipamentos"])
+
+    def test_cadastro_guiado_do_negocio_preserva_campos_omitidos(self):
+        loja = {"tipo": "restaurante_hotel", "alimentacao": ["caseira"], "estado": "SP", "cidade": "São Paulo"}
+        Store().negocio_salvar(loja)
+        status, dados = api.tratar("PATCH", "/api/negocio", {"zona": "sul"})
+        self.assertEqual(status, 200)
+        self.assertEqual({campo: dados["negocio"][campo] for campo in loja}, loja)
+        self.assertEqual(dados["negocio"]["zona"], "sul")
+        self.assertFalse(dados["cadastro"]["negocio_pendente"])
+        self.assertEqual(Store().negocio(), dados["negocio"])
+
+    def test_conferir_despensa_avanca_sem_lancar_compra(self):
+        antes = api.tratar("GET", "/api/estado")[1]
+        self.assertFalse(antes["despensa_consultada"])
+        status, conferida = api.tratar("POST", "/api/despensa/conferir")
+        self.assertEqual(status, 200)
+        self.assertTrue(conferida["itens"])
+        self.assertTrue(conferida["estado"]["despensa_consultada"])
+        self.assertEqual(conferida["estado"]["orcamento"], antes["orcamento"])
+        self.assertEqual(api.tratar("POST", "/api/despensa/conferir"), (status, conferida))
+        self.assertTrue(api.tratar("GET", "/api/estado")[1]["despensa_consultada"])
+
     def test_carrinho_pela_tela_aparece_para_a_consultora(self):
         status, dados = api.tratar("POST", "/api/carrinho/itens", {"nome": "Couve", "preco_total": "12,00", "quantidade": 1, "unidade": "maço"})
         self.assertEqual(status, 201)
@@ -260,12 +319,15 @@ class ApiTests(StoreTestCase):
             self.assertIn("erro", dados)
 
     def test_perfil_do_negocio_pela_tela(self):
-        status, dados = api.tratar("PUT", "/api/negocio", {"tipo": "restaurante_hotel", "vende": ["prato_do_dia", "bolos", "pizzas"], "publico": "hóspedes"})
+        status, dados = api.tratar("PUT", "/api/negocio", {"tipo": "restaurante_hotel", "alimentacao": ["caseira", "doces", "pizza"], "estado": "SP", "cidade": "São Paulo"})
         self.assertEqual(status, 200)
         self.assertEqual(dados["negocio"]["tipo"], "restaurante_hotel")
+        self.assertEqual([o["id"] for o in dados["opcoes"]["alimentacao"]][:3], ["caseira", "marmita", "pizza"])
+        self.assertNotIn("vende", dados["opcoes"])
         consulta = call("carrinho_consultar")
-        self.assertEqual(consulta["negocio"]["vende"], ["prato_do_dia", "bolos", "pizzas"])
+        self.assertEqual(consulta["negocio"]["alimentacao"], ["caseira", "doces", "pizza"])
         self.assertIn("Restaurante de hotel", consulta["negocio_resumo"])
+        self.assertEqual(api.tratar("PUT", "/api/negocio", {"alimentacao": ["sushi"]})[0], 400)
 
     def test_ida_e_volta_http_de_verdade(self):
         servidor = api.criar_servidor("127.0.0.1", 0)
@@ -283,6 +345,12 @@ class ApiTests(StoreTestCase):
                 except urllib.error.HTTPError as exc:
                     with exc:
                         return exc.code, json.loads(exc.read())
+
+            for config in ("SABOR_DA_MARIA_DB", "SABOR_DA_MARIA_XLSX"):
+                with self.subTest(config=config), patch.dict(os.environ, {config: self._tmp.name}):
+                    with self.assertLogs(api.logger, level="ERROR"):
+                        status, dados = pedir("GET", "/api/saude")
+                    self.assertEqual((status, dados), (503, {"erro": "banco de dados indisponível"}))
 
             self.assertEqual(pedir("GET", "/api/saude"), (200, {"status": "ok"}))
             status, dados = pedir("POST", "/api/carrinho/itens", {"nome": "Couve", "preco_total": 12})

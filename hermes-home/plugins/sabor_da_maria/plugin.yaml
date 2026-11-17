@@ -1,6 +1,6 @@
 name: sabor_da_maria
-version: 1.4.0
-description: "Consultoria de cardápio e precificação da Dona Maria (Sabor da Maria): despensa em SQLite a partir da planilha, elicitação de equipamentos/técnicas/restrições, conferência de ingredientes vs orçamento, CMV e cenários de preço com taxa de 10%. Carrinho de compras com saldo do orçamento (pratos abertos, com ingredientes e valores), pratos e ingredientes salvos, perfil do negócio com a localização da loja e Analytics de pratos mais vendidos por zona, cidade, estado, região e país, que a consultora usa para sugerir pratos e ingredientes. Travas no backend: CMV, preço, registro e carrinho por receita recusam prato com pendência; o aceite reserva estoque e compromete orçamento numa transação só. Minha cozinha: equipamentos, utensílios, habilidades e rotina da Dona Maria, que a consultora pergunta na primeira conversa ou ela marca na tela, salvos no SQLite e consultados toda vez que um prato é montado; fichas em prompts/base-de-conhecimento/cozinha-e-equipamentos avisam quando a cozinha dela não faz um prato ou não serve para um ingrediente, e o Analytics diz quanto cobrar para lucrar depois da taxa. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
+version: 1.6.0
+description: "Consultoria de cardápio do Sabor da Maria: pesquisa de receitas na web com referências regionais, despensa e perfil de negócio/cozinha em SQLite, conferência de ingredientes e orçamento, carrinho, CMV e análises de preço personalizadas depois do aceite do prato. Inclui provider local de web_extract para receitas (schema.org/Recipe)."
 author: "Gabriel Sousa"
 license: MIT
 tags: [cozinha, precificacao, cmv, delivery, ifood]
@@ -8,8 +8,11 @@ provides_tools:
   - despensa_listar
   - despensa_buscar
   - despensa_atualizar
+  - despensa_registrar_compras
   - perfil_cozinha_consultar
   - perfil_cozinha_salvar
+  - negocio_salvar
+  - pratos_selecionar
   - receita_conferir_ingredientes
   - prato_calcular_cmv
   - preco_sugerir
@@ -22,17 +25,24 @@ provides_tools:
   - carrinho_remover
   - carrinho_montar_da_receita
   - salvos_salvar
-  - analytics_consultar
+  - analytics_analises_consultar
 provides_hooks:
   # pre_llm_call: guarda o que a Dona Maria disse (falas.py, trava de evidência do perfil) e leva o carrinho,
-  # o saldo e o perfil do negócio ao turno (painel.py). post_tool_call: respostas do clarify (falas.py).
+  # o saldo e o perfil do negócio ao turno, com o roteiro da pesquisa de receitas quando ela pede (painel.py, pesquisa.py).
+  # post_tool_call: respostas do clarify (falas.py) e o passo a passo da consultora para a tela (atividade.py).
+  # transform_tool_result: o próximo passo no resultado de uma busca de receita e da leitura da página (pesquisa.py).
   - pre_llm_call
+  - post_llm_call
   - post_tool_call
+  - transform_tool_result
 provides_web_providers:
   - receitas-local
 optional_env:
   - SABOR_DA_MARIA_XLSX
   - SABOR_DA_MARIA_DB
   - SABOR_DA_MARIA_ORCAMENTO
+  - SABOR_DA_MARIA_INTERNALS
+  - SABOR_DA_MARIA_EMBEDDINGS_URL
+  - SABOR_DA_MARIA_EMBEDDINGS_MODEL
 # Sem dependências Python: só stdlib (sqlite3, zipfile, urllib, html.parser).
 python_dependencies: []
