@@ -7,8 +7,10 @@ import { CaminhoDoPrato, etapasConcluidas, proximaEtapa, type EtapaDoPrato } fro
 import { CartSheet } from "./cart";
 import { AppBar, ChatPane, Rail, Sidebar } from "./components";
 import { KitchenSheet } from "./cozinha";
-import { ConducaoChat } from "./conducao-chat";
+import { ConclusaoChat, ConducaoChat } from "./conducao-chat";
 import { DespensaSheet } from "./despensa";
+import { DivulgacaoChat } from "./divulgacao";
+import { StoreIcon } from "./icons";
 import {
   ApiError,
   addItem,
@@ -35,6 +37,7 @@ import { sugestoesPendentes } from "./lib/sugestoes";
 import { applyResults, settleTools } from "./lib/tools";
 import { useAtividade } from "./lib/useAtividade";
 import { useHistorico } from "./lib/useHistorico";
+import { Sheet } from "./sheet";
 import type { AcaoJornada, CarrinhoAcoes, ChatMessage, Conversation, Estado, Negocio, NovaCozinha, Online, PeriodoVendas, PratoEscolhido } from "./types";
 
 function uid(): string {
@@ -68,6 +71,7 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [buscaWeb, setBuscaWeb] = useState(false);
   const [etapaVisitada, setEtapaVisitada] = useState<{ etapa: EtapaDoPrato; referencia: EtapaDoPrato } | null>(null);
+  const [conclusaoDispensada, setConclusaoDispensada] = useState(false);
   const [sending, setSending] = useState(false);
   const [online, setOnline] = useState<Online>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -77,7 +81,8 @@ export function App() {
   const [abaAnalytics, setAbaAnalytics] = useState<"vendas" | "pratos">("pratos");
   const [cadastroAberto, setCadastroAberto] = useState<TipoCadastro | null>(null);
   const [cadastroDispensado, setCadastroDispensado] = useState<string | null>(null);
-  const [painel, setPainel] = useState<"agente" | "despensa" | "carrinho" | "cozinha" | "pratos" | "negocio" | "analytics" | null>(null);
+  const [painel, setPainel] = useState<"agente" | "despensa" | "carrinho" | "cozinha" | "pratos" | "negocio" | "analytics" | "divulgacao" | null>(null);
+  const [erroDivulgacao, setErroDivulgacao] = useState<string | null>(null);
   const busy = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const envioGuiado = useRef<{ visivel: string; paraAgente: string } | null>(null);
@@ -93,6 +98,7 @@ export function App() {
     setCadastroDispensado(null);
     setBuscaWeb(false);
     setEtapaVisitada(null);
+    setConclusaoDispensada(false);
   }, []);
 
   const abrirHistorico = useCallback((lista: Conversation[]) => {
@@ -163,8 +169,10 @@ export function App() {
   const escolhaPendente = sugestoes.length > 0 && estado?.jornada?.etapa === "pesquisa";
   const concluidas = etapasConcluidas(estado);
   const etapaSugerida = estado?.jornada?.passo ?? proximaEtapa(concluidas);
+  const concluido = etapaSugerida === "concluido";
   const etapa = etapaVisitada?.referencia === etapaSugerida ? etapaVisitada.etapa : etapaSugerida;
   useEffect(() => setEtapaVisitada(null), [etapaSugerida]);
+  useEffect(() => { if (!concluido) setConclusaoDispensada(false); }, [concluido]);
   const versaoAnalises = `${activeId ?? ""}:${tools
     .filter((tool) =>
       tool.status !== "running" &&
@@ -238,7 +246,7 @@ export function App() {
     setPainel(null);
     // A pergunta já aparece no chat. Abrir a resposta não deve enviar um aceite
     // genérico nem provocar outra rodada da mesma pergunta à consultora.
-    if (estado?.jornada?.prato_id === prato.id && estado.jornada.pergunta?.texto.trim()) {
+    if (!concluido && estado?.jornada?.prato_id === prato.id && estado.jornada.pergunta?.texto.trim()) {
       setFocusTick((value) => value + 1);
       return;
     }
@@ -256,7 +264,7 @@ export function App() {
 
   async function send(raw: string, webSearch = false, cadastroEnviado?: TipoCadastro, contextoDaEscolha?: string, preservarRascunho = false,
     descartaSugestoes = false) {
-    const text = raw.trim() || (webSearch ? PEDIR_SUGESTOES : "");
+    const text = raw.trim() || (webSearch && !concluido ? PEDIR_SUGESTOES : "");
     if (!text || busy.current) return;
     const textoParaAgente = contextoDaEscolha ?? (envioGuiado.current?.visivel.trim() === text ? envioGuiado.current.paraAgente : text);
     envioGuiado.current = null;
@@ -264,6 +272,7 @@ export function App() {
     busy.current = true;
     setSending(true);
     setMenuOpen(false);
+    if (concluido) setConclusaoDispensada(true);
 
     const existing = conversationsRef.current.find((conversation) => conversation.id === activeId) ?? null;
     const conversationId = existing?.id ?? uid();
@@ -321,7 +330,7 @@ export function App() {
         role,
         content: role === "assistant" ? esconderPedidoCadastro(content)
           : id === userMessage.id && textoParaAgente !== text ? textoParaAgente
-          : webSearch && content !== PEDIR_SUGESTOES ? `Pesquise na internet receitas para este pedido:\n\n${content}` : content,
+          : webSearch && content !== PEDIR_SUGESTOES ? `Pesquise na internet${concluido && id === userMessage.id ? "" : " receitas"} para este pedido:\n\n${content}` : content,
       }))
       .filter((message) => message.content.trim());
 
@@ -494,8 +503,25 @@ export function App() {
     return null;
   }
 
+  function conversarComMestreCuca() {
+    setFocusTick((valor) => valor + 1);
+  }
+
   function abrirEtapa(id: EtapaDoPrato) {
     setPainel(null);
+    if (id === "concluido") {
+      conversarComMestreCuca();
+      return;
+    }
+    if (concluido) {
+      const destinos = { negocio: "negocio", estoque: "despensa", ajuda: null, montagem: "pratos", divulgacao: "divulgacao" } as const;
+      const destino = destinos[id];
+      if (destino) {
+        if (destino === "divulgacao") setErroDivulgacao(null);
+        setPainel(destino);
+      } else conversarComMestreCuca();
+      return;
+    }
     if (id === "divulgacao" && estado?.jornada?.plano_divulgacao) {
       requestAnimationFrame(() => document.getElementById("divulgacao-titulo")?.scrollIntoView({ block: "nearest" }));
       return;
@@ -516,7 +542,7 @@ export function App() {
       : estado?.jornada?.controle?.ajuda === "proprio"
       ? "Quero montar meu próprio prato. Pergunte qual prato ou ingrediente tenho em mente antes de criar a ficha."
       : "Apresente só as opções de ajuda para montar o prato e espere minha escolha antes de pesquisar ou criar uma ficha.";
-    const pedidos: Record<EtapaDoPrato, string> = {
+    const pedidos: Record<Exclude<EtapaDoPrato, "concluido">, string> = {
       negocio: "Vamos revisar meu negócio. Use os dados salvos e pergunte só a próxima informação necessária sobre tipo de negócio, local e objetivo.",
       estoque: "Mostre os ingredientes e custos que já tenho no estoque, sem lançar nova compra. Espere eu confirmar que estou pronta antes de oferecer a próxima etapa.",
       ajuda: "Apresente só as opções de ajuda para montar o prato: ajuda da IA com receitas reais ou montar minha própria ideia. Espere minha escolha antes de pesquisar.",
@@ -571,6 +597,7 @@ export function App() {
           setCadastroDispensado(null);
           setBuscaWeb(false);
           setMenuOpen(false);
+          setConclusaoDispensada(false);
         }}
         onSelect={(id) => {
           if (busy.current) return;
@@ -593,11 +620,11 @@ export function App() {
         onCart={() => setPainel("carrinho")}
         onCozinha={() => {
           if (estado?.pratos_escolhidos?.length) setPainel("pratos");
-          else if (estado?.cadastro?.cozinha_pendente) abrirOnboarding("cozinha");
+          else if (!concluido && estado?.cadastro?.cozinha_pendente) abrirOnboarding("cozinha");
           else setPainel("cozinha");
         }}
         onNegocio={() => {
-          if (estado?.cadastro?.negocio_pendente) abrirOnboarding("negocio");
+          if (!concluido && estado?.cadastro?.negocio_pendente) abrirOnboarding("negocio");
           else setPainel("negocio");
         }}
         onAnalytics={() => abrirAnalytics()}
@@ -608,13 +635,16 @@ export function App() {
         draft={draft}
         sending={sending}
         online={online}
+        modoLivre={concluido}
         onboarding={estado && tipoCadastro ? (
           <CadastroChat key={`${activeId ?? "nova"}:${tipoCadastro}`} tipo={tipoCadastro} estado={estado} bloqueado={sending}
             onClose={fecharCadastro}
             onCozinha={(cozinha) => enviarCadastro("cozinha", () => saveCozinha(cozinha))}
             onNegocio={(campos) => enviarCadastro("negocio", () => updateNegocio(campos))} />
         ) : null}
-        conducao={!tipoCadastro ? <ConducaoChat estado={estado} bloqueado={sending || pending} versao={versaoAnalises}
+        conducao={concluido ? !conclusaoDispensada && !sending && !pending ? (
+          <ConclusaoChat temPlano={Boolean(estado?.jornada?.plano_divulgacao)} onConversar={conversarComMestreCuca} />
+        ) : null : !tipoCadastro ? <ConducaoChat estado={estado} bloqueado={sending || pending} versao={versaoAnalises}
           sugestoes={sugestoes}
           onCadastro={abrirOnboarding}
           onAcao={escolherEtapa}
@@ -657,6 +687,19 @@ export function App() {
       ) : null}
       {painel === "negocio" ? (
         <BusinessSheet estado={estado} onClose={() => setPainel(null)} onSave={(negocio: Negocio) => aplicar(() => saveNegocio(negocio))} />
+      ) : null}
+      {painel === "divulgacao" && estado ? (
+        <Sheet titleId="painel-divulgacao-titulo" title="Divulgação" icon={<StoreIcon />} onClose={() => setPainel(null)} wide>
+          <DivulgacaoChat estado={estado} bloqueado={sending || pending}
+            onEscolha={(acao, visivel, mensagem) => {
+              void escolherEtapa(acao, visivel, mensagem).then((erro) => {
+                setErroDivulgacao(erro);
+                if (!erro && mensagem) setPainel(null);
+              });
+            }}
+            onEnviar={(mensagem) => { setPainel(null); conduzir(mensagem); }} onAnalytics={() => abrirAnalytics()} />
+          {erroDivulgacao ? <p className="sheet-note error" role="alert">{erroDivulgacao}</p> : null}
+        </Sheet>
       ) : null}
       {painel === "analytics" ? (
         <AnalyticsSheet

@@ -278,6 +278,7 @@ type ChatPaneProps = {
   draft: string;
   sending: boolean;
   online: Online;
+  modoLivre?: boolean;
   onDraft: (value: string) => void;
   onSend: (text: string) => void;
   onStop: () => void;
@@ -288,7 +289,7 @@ type ChatPaneProps = {
   compactProgress: ReactNode;
 };
 
-export function ChatPane({ messages, onboarding, conducao, draft, sending, online, onDraft, onSend, onStop, focusTick, webSearch, onToggleWebSearch, compactProgress }: ChatPaneProps) {
+export function ChatPane({ messages, onboarding, conducao, draft, sending, online, modoLivre, onDraft, onSend, onStop, focusTick, webSearch, onToggleWebSearch, compactProgress }: ChatPaneProps) {
   const threadRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const acompanharFim = useRef(true);
@@ -347,13 +348,14 @@ export function ChatPane({ messages, onboarding, conducao, draft, sending, onlin
   };
 
   const status = online === null ? "conectando…" : online ? "online" : "acordando a cozinha…";
+  const nomeAssistente = modoLivre ? "Mestre Cuca" : "Consultora";
 
   return (
     <main className="chat">
       <header className="chat-head">
         <Avatar size={44} status={online ? "on" : "wait"} />
         <div>
-          <h1>Consultora de cardápio</h1>
+          <h1>{modoLivre ? nomeAssistente : "Consultora de cardápio"}</h1>
           <p className={online ? "chat-status on" : "chat-status"}>
             <span className="dot" />
             {status}
@@ -365,9 +367,9 @@ export function ChatPane({ messages, onboarding, conducao, draft, sending, onlin
       <div className="thread" ref={threadRef}>
         <div className="thread-inner">
           <p className="day">Hoje</p>
-          {messages.length === 0 ? <Welcome /> : null}
+          {messages.length === 0 && !modoLivre ? <Welcome /> : null}
           {messages.map((message) => (
-            <MessageView key={message.id} message={message} onInspecionar={() => { acompanharFim.current = false; }} />
+            <MessageView key={message.id} message={message} nomeAssistente={nomeAssistente} onInspecionar={() => { acompanharFim.current = false; }} />
           ))}
           {onboarding}
           {conducao}
@@ -375,7 +377,7 @@ export function ChatPane({ messages, onboarding, conducao, draft, sending, onlin
       </div>
       {online === false ? (
         <p className="banner" role="status">
-          A conexão com a consultora está indisponível. Tentando reconectar…
+          {modoLivre ? "A conexão com Mestre Cuca está indisponível. Tentando reconectar…" : "A conexão com a consultora está indisponível. Tentando reconectar…"}
         </p>
       ) : null}
       <form className="composer" onSubmit={submit}>
@@ -387,14 +389,15 @@ export function ChatPane({ messages, onboarding, conducao, draft, sending, onlin
         </div>
         <div className="composer-box">
           <label className="sr-only" htmlFor="fala">
-            Mensagem para a consultora
+            {modoLivre ? "Mensagem para Mestre Cuca" : "Mensagem para a consultora"}
           </label>
           <textarea
             id="fala"
             ref={boxRef}
             rows={1}
             value={draft}
-            placeholder={webSearch ? "Digite uma receita ou envie para usar sua despensa" : "Escreve do jeito que você falaria com ela…"}
+            placeholder={webSearch ? (modoLivre ? "Digite o que você quer pesquisar…" : "Digite uma receita ou envie para usar sua despensa")
+              : modoLivre ? "Converse com Mestre Cuca…" : "Escreve do jeito que você falaria com ela…"}
             disabled={sending}
             onChange={(event) => onDraft(event.target.value)}
             onKeyDown={(event) => {
@@ -409,7 +412,7 @@ export function ChatPane({ messages, onboarding, conducao, draft, sending, onlin
               <StopIcon />
             </button>
           ) : (
-            <button className="send" type="submit" aria-label={webSearch && !draft.trim() ? "Pesquisar receitas para minha despensa" : "Enviar mensagem"} title="Enviar" disabled={!draft.trim() && !webSearch}>
+            <button className="send" type="submit" aria-label={webSearch && !modoLivre && !draft.trim() ? "Pesquisar receitas para minha despensa" : "Enviar mensagem"} title="Enviar" disabled={!draft.trim() && (!webSearch || Boolean(modoLivre))}>
               <SendIcon />
             </button>
           )}
@@ -558,7 +561,7 @@ function ConteudoDaMensagem({ texto, recolherFicha, onInspecionar }: { texto: st
   </div>;
 }
 
-function MessageView({ message, onInspecionar }: { message: ChatMessage; onInspecionar?: () => void }) {
+function MessageView({ message, nomeAssistente, onInspecionar }: { message: ChatMessage; nomeAssistente: string; onInspecionar?: () => void }) {
   const mine = message.role === "user";
   // Só mensagem recém-criada entra animada; ao recarregar a conversa nada pisca.
   const fresh = typeof message.at === "number" && Date.now() - message.at < 2000;
@@ -568,7 +571,7 @@ function MessageView({ message, onInspecionar }: { message: ChatMessage; onInspe
       {mine ? null : <Avatar size={34} />}
       <div className="msg-col">
         <div className={message.error ? "bubble error" : "bubble"}>
-          <span className="sr-only">{mine ? "Dona Maria: " : "Consultora: "}</span>
+          <span className="sr-only">{mine ? "Dona Maria: " : `${nomeAssistente}: `}</span>
           {mine && message.webSearch ? <p className="message-search"><GlobeIcon /> Busca na web</p> : null}
           {message.pending ? <TurnProgress message={message} /> : null}
           {message.tools.length > 0 ? <Steps message={message} /> : null}

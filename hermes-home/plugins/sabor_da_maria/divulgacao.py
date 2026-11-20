@@ -207,31 +207,32 @@ def _campanha(store: Store, plano: dict[str, Any], margem: Decimal, investimento
     teto = max(Decimal(0), (margem - repasse * minima) * porcoes).quantize(_CENTAVO, rounding=ROUND_DOWN)
     previsto = min(investimento, teto) if investimento is not None else Decimal(0)
     if margem < repasse * minima:
-        estrategia = "Medir a procura pelo cardápio atual e revisar a margem antes de considerar mídia paga."
+        estrategia = "Destacar o prato no cardápio e medir a procura antes de investir em anúncios ou descontos."
     elif investimento is not None and investimento > teto:
-        estrategia = "Usar os canais próprios e avaliar mídia paga até o limite compatível com a margem do lote."
+        estrategia = "Destacar o prato no cardápio e limitar um eventual teste de anúncios ao que a margem comporta."
     elif previsto > 0:
-        estrategia = "Combinar a mensagem para canais próprios com um piloto de anúncios, conforme a oferta do Portal."
+        estrategia = "Destacar o prato no cardápio e atrair visitas com um teste de Anúncios, conforme a oferta do Portal do Parceiro."
     else:
-        estrategia = "Começar pelos canais próprios e usar as vendas registradas como referência para o próximo teste."
+        estrategia = "Destacar o prato no cardápio e compartilhar a mensagem nos canais da loja para medir a procura."
     preco = costing.brl(prato["preco_venda"])
     nome = prato["nome"]
     return {
-        "objetivo": f"Dar visibilidade a {nome} no cardápio e acompanhar as porções vendidas.",
+        "objetivo": f"Apresentar o Sabor da Maria a novos clientes, destacar {nome} e acompanhar os pedidos.",
         "canal": "Cardápio e canais próprios" if previsto == 0 else "Canais próprios e piloto de Anúncios",
         "estrategia": estrategia,
         "titulo": f"{nome} no Sabor da Maria",
         "descricao": f"{nome} por {preco} a porção. Consulte a disponibilidade no cardápio do Sabor da Maria.",
-        "legenda": f"Hoje tem {nome} no Sabor da Maria por {preco} a porção. Confira a disponibilidade no nosso cardápio!",
+        "legenda": f"Já conhece o Sabor da Maria? Confira no cardápio a disponibilidade de {nome} por {preco} a porção!",
         "investimento": vendas._moeda(previsto),
         "lucro_previsto_por_porcao": vendas._moeda(margem - previsto / porcoes),
         "teto_para_margem": vendas._moeda(teto),
         "margem_minima": float(minima) if origem_meta != "sem_meta" else None,
         "origem_margem": origem_meta,
         "tarefas": [
-            "Usar o título, o preço aprovado e a mensagem pronta nos canais escolhidos.",
-            "Acompanhar porções vendidas e margem por porção no Analytics.",
-            f"Comparar o resultado ao fim de {volume['dias']} {'dia' if volume['dias'] == 1 else 'dias'}.",
+            "Confira o cardápio no Portal do Parceiro e use o título, a descrição e a mensagem para destacar o prato.",
+            "Na Central de Crescimento, confira as opções para a loja. Se testar Anúncios, escolha um limite compatível com a margem do prato.",
+            "Para oferecer um cupom, simule quanto sobra no pedido após a parte do desconto paga pela loja. Defina o pedido mínimo e a quantidade de cupons.",
+            f"Depois de {volume['dias']} {'dia' if volume['dias'] == 1 else 'dias'}, compare visitas e pedidos no Portal do Parceiro e confira a margem no Analytics.",
         ],
     }
 
@@ -251,29 +252,35 @@ def preparar(store: Store, preferencias: dict[str, Any], *, agora: datetime | No
     """Salva o plano local após o aceite. Repetir reabre a mesma campanha."""
     with _LOCK, store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        estado = jornada.resumo(store)
-        if estado["etapa"] != "divulgacao" or estado["controle"]["divulgacao"] != "interesse":
+        pratos = jornada.pratos_atuais(store)
+        estado = jornada.resumo(store, pratos=pratos)
+        if estado["etapa"] not in ("divulgacao", "concluido") or estado["controle"]["divulgacao"] != "interesse":
             raise ValueError("Conclua o cardápio e confirme o interesse em divulgação para preparar o plano.")
         anterior = estado.get("plano_divulgacao")
         preferencias = {**(anterior or {}).get("preferencias", {}), **preferencias}
         if anterior and anterior.get("preferencias", {}) == preferencias:
             return anterior, False
         ativos = set(estado["pratos_ativos"])
-        pratos = [p for p in store.pratos_em_andamento() if p["id"] in ativos]
+        divulgaveis = [p for p in jornada.pratos_divulgaveis(pratos) if p["id"] in ativos]
         plano = planejar(store, preferencias, agora=agora, preparar_campanha=True)
-        plano.update({"cardapio": _identidade(pratos), "preferencias": preferencias,
+        plano.update({"cardapio": _identidade(divulgaveis), "preferencias": preferencias,
                       "criado_em": vendas._iso(vendas._agora(agora))})
         store._config_set(conn, _CHAVE_PLANO, json.dumps(plano, ensure_ascii=False))
+        controle = {**jornada.controle(store), "configuracao_concluida": True}
+        store._config_set(conn, jornada.CHAVE_CONTROLE, json.dumps(controle, ensure_ascii=False))
     return plano, True
 
 
-def texto_preparado(plano: dict[str, Any], novo: bool) -> str:
+def texto_preparado(plano: dict[str, Any], novo: bool, *, concluiu_configuracao: bool = False) -> str:
     campanha = plano["campanha"]
     nome = plano["prato"]["nome"]
     titulo = f"Salvei o plano de divulgação de {nome}" if novo else f"O plano de divulgação de {nome} já está salvo"
-    retorno = f"**{titulo}**. A etapa 5 está concluída."
+    retorno = f"**{titulo}.**"
     if novo:
         retorno += (f"\n\n{campanha['estrategia']} O plano prevê **{costing.brl(campanha['investimento'])}** "
                     "de investimento em divulgação.\n\n"
                     f"**Mensagem pronta para usar**\n\n{campanha['legenda']}")
-    return retorno + "\n\nVocê pode consultar os materiais e as ações no cartão de divulgação."
+    retorno += "\n\nOs materiais estão na etapa de divulgação. As campanhas são ativadas no Portal do Parceiro."
+    if concluiu_configuracao:
+        retorno += "\n\n" + jornada.MENSAGEM_CONCLUSAO
+    return retorno

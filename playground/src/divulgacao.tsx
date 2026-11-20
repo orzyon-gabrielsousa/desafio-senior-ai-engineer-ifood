@@ -1,21 +1,28 @@
 import { useState } from "react";
+import { ChartIcon, SparkIcon, StoreIcon } from "./icons";
 import { brl, lerNumero } from "./lib/format";
 import { ACEITAR_ANALISE_DIVULGACAO, PEDIR_ANALISE_DIVULGACAO } from "./lib/prompts";
 import type { AcaoJornada, Estado, PlanoDivulgacao, PratoEscolhido } from "./types";
 import "./divulgacao.css";
 
-const FONTES = [
+const OPCOES = [
   {
-    titulo: "Anúncios",
+    titulo: "iFood Anúncios",
+    descricao: "Dê destaque à loja no app e leve mais pessoas ao cardápio. A cobrança é por visita vinda do anúncio, com limite diário.",
     url: "https://blog-parceiros.ifood.com.br/anuncios/",
+    Icone: StoreIcon,
   },
   {
     titulo: "Campanha Inteligente",
+    descricao: "O iFood distribui o investimento entre ofertas disponíveis para a sua loja para atrair clientes e incentivar novos pedidos.",
     url: "https://blog-parceiros.ifood.com.br/campanha-inteligente/",
+    Icone: SparkIcon,
   },
   {
-    titulo: "Central de Crescimento",
-    url: "https://blog-parceiros.ifood.com.br/central-de-crescimento/",
+    titulo: "Cupons e descontos",
+    descricao: "Ofereça um preço menor para incentivar a compra. No Cupom Flexível, você escolhe o desconto, o público e a quantidade de cupons.",
+    url: "https://blog-parceiros.ifood.com.br/cupom-flexivel/",
+    Icone: ChartIcon,
   },
 ];
 
@@ -33,38 +40,58 @@ export function DivulgacaoChat({ estado, bloqueado, onEscolha, onEnviar, onAnaly
   const idsAtivos = estado.jornada?.pratos_ativos;
   const pratos = idsAtivos === undefined ? todosOsPratos : todosOsPratos.filter(({ id }) => idsAtivos.includes(id));
   const aprovados = pratos.filter((prato) => prato.status === "aceito" && prato.preco_venda !== null && !prato.bloqueios?.length);
-  if (!aprovados.length || aprovados.length !== pratos.length) return null;
+  const concluido = estado.jornada?.passo === "concluido";
+  if (!aprovados.length || (!concluido && aprovados.length !== pratos.length)) {
+    return concluido ? <p className="divulgacao-nota">Confira as fichas em revisão e registre os preços para preparar um plano com o cardápio atualizado.</p> : null;
+  }
   const escolha = estado.jornada?.controle?.divulgacao ?? "";
   const plano = estado.jornada?.plano_divulgacao;
+  const pendente = escolha === "interesse" && !plano;
 
   return <section className="divulgacao-chat" aria-labelledby="divulgacao-titulo">
-    <h3 id="divulgacao-titulo">{plano ? "Divulgação preparada" : "Divulgação do cardápio"}</h3>
-    {!escolha ? <>
-      <p>A consultora prepara as mensagens, o plano e o impacto na margem do cardápio.</p>
-      <div className="chips" role="group" aria-label="Avaliar publicidade do iFood">
-        <button type="button" className="chip" disabled={bloqueado} onClick={() => onEscolha("interesse_divulgacao", ACEITAR_ANALISE_DIVULGACAO, ACEITAR_ANALISE_DIVULGACAO)}>Preparar divulgação</button>
-        <button type="button" className="chip" disabled={bloqueado} onClick={() => onEscolha("dispensar_divulgacao", "Agora não quero publicidade.")}>Deixar para depois</button>
-      </div>
-    </> : escolha === "dispensada" ? <>
-      <p>Você pode começar com o cardápio atual e voltar à divulgação quando quiser.</p>
-      <button type="button" className="link-btn" disabled={bloqueado} onClick={() => onEscolha("interesse_divulgacao", ACEITAR_ANALISE_DIVULGACAO, ACEITAR_ANALISE_DIVULGACAO)}>Preparar divulgação</button>
+    <header className="divulgacao-apresentacao">
+      <h3 id="divulgacao-titulo">{plano ? "Seu plano de divulgação está pronto" : "Dê visibilidade à sua loja no iFood"}</h3>
+      <p>{plano ? "Use a mensagem e as ações do Mestre Cuca para divulgar seu cardápio."
+        : "O Mestre Cuca prepara a divulgação da loja e dos pratos com os preços e a margem do seu cardápio."}</p>
+    </header>
+    {plano ? <>
+      <MateriaisDivulgacao key={plano.criado_em} plano={plano} />
+      {onAnalytics ? <div className="divulgacao-acoes">
+        <button type="button" className="mini-btn" onClick={onAnalytics}>Abrir Analytics</button>
+      </div> : null}
     </> : <>
-      {plano ? <MateriaisDivulgacao key={plano.criado_em} plano={plano} /> : <p>A consultora pode concluir o plano com os dados que você já informou.</p>}
-      <div className="divulgacao-acoes">
-        {!plano ? <button type="button" className="chip" disabled={bloqueado} onClick={() => onEnviar(PEDIR_ANALISE_DIVULGACAO)}>Preparar plano no chat</button> : null}
-        {onAnalytics ? <button type="button" className="mini-btn" onClick={onAnalytics}>Abrir Analytics</button> : null}
-        {!plano ? <button type="button" className="link-btn" disabled={bloqueado} onClick={() => onEscolha("dispensar_divulgacao", "Vou deixar a publicidade para depois.")}>Deixar para depois</button> : null}
+      <ul className="divulgacao-opcoes" aria-label="Opções de divulgação">
+        {OPCOES.map(({ titulo, descricao, url, Icone }) => <li key={titulo}>
+          <span className="divulgacao-icone"><Icone /></span>
+          <h4>{titulo}</h4>
+          <p>{descricao}</p>
+          <a href={url} target="_blank" rel="noreferrer" aria-label={`Saiba mais sobre ${titulo}`}>Saiba mais</a>
+        </li>)}
+      </ul>
+      <div className="divulgacao-resultados">
+        <dl>
+          <div><dt>Mais visitas</dt><dd>Até 40%</dd></div>
+          <div><dt>Mais vendas</dt><dd>Até 20%</dd></div>
+        </dl>
+        <p>Resultados divulgados pelo iFood para Anúncios. O desempenho varia por loja. <a href={OPCOES[0].url} target="_blank" rel="noreferrer">Ver fonte</a></p>
       </div>
-      <SimulacaoDivulgacao pratos={aprovados} />
-      <details className="divulgacao-simulacao">
-        <summary>Fontes oficiais do iFood</summary>
-        <ul className="divulgacao-fontes">
-          {FONTES.map((fonte) => <li key={fonte.titulo}>
-            <a href={fonte.url} target="_blank" rel="noreferrer">{fonte.titulo}</a>
-          </li>)}
-        </ul>
-      </details>
+      <div className="divulgacao-acoes">
+        {pendente
+          ? <button type="button" className="chip divulgacao-principal" disabled={bloqueado} onClick={() => onEnviar(PEDIR_ANALISE_DIVULGACAO)}>Retomar preparo do plano</button>
+          : <button type="button" className="chip divulgacao-principal" disabled={bloqueado} onClick={() => onEscolha("interesse_divulgacao", ACEITAR_ANALISE_DIVULGACAO, ACEITAR_ANALISE_DIVULGACAO)}>Quero divulgar no iFood</button>}
+        {escolha !== "dispensada" ? <button type="button" className="link-btn" disabled={bloqueado} onClick={() => onEscolha("dispensar_divulgacao", "Vou deixar a publicidade para depois.")}>Deixar para depois</button> : null}
+      </div>
+      <p className="divulgacao-nota">O Mestre Cuca salva o plano aqui. Confira as condições e ative as campanhas no <a href="https://portal.ifood.com.br/" target="_blank" rel="noreferrer">Portal do Parceiro</a>.</p>
     </>}
+    <SimulacaoDivulgacao pratos={aprovados} />
+    {plano ? <details className="divulgacao-simulacao">
+      <summary>Fontes oficiais do iFood</summary>
+      <ul className="divulgacao-fontes">
+        {OPCOES.map(({ titulo, url }) => <li key={titulo}>
+          <a href={url} target="_blank" rel="noreferrer">{titulo}</a>
+        </li>)}
+      </ul>
+    </details> : null}
   </section>;
 }
 
@@ -86,7 +113,7 @@ function MateriaisDivulgacao({ plano }: { plano: PlanoDivulgacao }) {
   return <>
     <p><strong>{prato.nome}</strong> · {campanha.canal} · {brl(campanha.investimento)} previstos</p>
     <p>{campanha.estrategia}</p>
-    <p className="divulgacao-nota">Os materiais estão salvos. A publicação no iFood é feita pelo Portal do Parceiro.</p>
+    <p className="divulgacao-nota">Confirme as condições da sua loja e publique pelo <a href="https://portal.ifood.com.br/" target="_blank" rel="noreferrer">Portal do Parceiro</a>.</p>
     <details className="divulgacao-simulacao">
       <summary>Materiais e ações</summary>
       <dl className="divulgacao-plano-dados">

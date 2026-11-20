@@ -1,6 +1,24 @@
-.divulgacao-chat { display: grid; gap: 12px; }
-.divulgacao-chat h3 { font-size: 1.05rem; margin: 0; }
+.divulgacao-chat { display: grid; gap: 16px; }
+.divulgacao-chat h3 { font-size: clamp(1.18rem, 2.5vw, 1.5rem); line-height: 1.24; margin: 0; color: var(--ink); }
 .divulgacao-chat p { margin: 0; }
+.divulgacao-chat a { color: var(--red-ink); text-underline-offset: 3px; }
+.divulgacao-apresentacao { display: grid; gap: 8px; padding: 17px 18px; border: 1px solid var(--red-line); border-radius: 14px; background: linear-gradient(135deg, var(--red-soft), #fff9f7); }
+.divulgacao-apresentacao p { font-size: .91rem; }
+.divulgacao-opcoes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(174px, 100%), 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.divulgacao-opcoes li { display: grid; grid-template-rows: auto auto 1fr auto; justify-items: start; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.divulgacao-opcoes h4 { margin: 0; font-size: .94rem; }
+.divulgacao-opcoes p { color: var(--ink-soft); font-size: .83rem; }
+.divulgacao-opcoes a { font-size: .82rem; font-weight: 700; }
+.divulgacao-icone { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--red-soft); color: var(--red-ink); }
+.divulgacao-icone svg { width: 19px; height: 19px; }
+.divulgacao-resultados { padding: 12px 14px; border-radius: 12px; background: var(--bg); }
+.divulgacao-resultados dl { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0 0 6px; }
+.divulgacao-resultados dl > div { display: grid; gap: 0; }
+.divulgacao-resultados dt, .divulgacao-resultados p { color: var(--ink-soft); font-size: .8rem; }
+.divulgacao-resultados dd { grid-row: 1; margin: 0; color: var(--red-ink); font-size: 1.25rem; font-weight: 800; }
+.divulgacao-principal.chip { border-color: var(--red-fill); background: var(--red-fill); color: white; }
+.divulgacao-principal.chip:hover:not(:disabled) { border-color: var(--red-hover); background: var(--red-hover); }
+.divulgacao-principal.chip:disabled { opacity: .65; }
 .divulgacao-fontes { display: grid; gap: 5px; margin: 0; padding-left: 20px; }
 .divulgacao-fontes a { color: var(--red-ink); font-size: .82rem; text-decoration: underline; text-underline-offset: 3px; }
 .divulgacao-nota { color: var(--muted); font-size: .82rem; line-height: 1.55; }

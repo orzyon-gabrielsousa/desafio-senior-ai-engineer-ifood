@@ -13,6 +13,20 @@
 .conducao-medida button:disabled { cursor: default; }
 /* Os botões das sugestões são frases com o nome do prato: em tela estreita quebram em duas linhas e ficam alinhados como texto. */
 .conducao-sugestoes .chip { border-radius: 18px; text-align: left; }
+.conducao-chat.conclusao-chat {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  padding: clamp(15px, 3vw, 25px);
+  border-color: var(--red-line);
+  background: linear-gradient(140deg, var(--red-soft), var(--surface) 60%);
+}
+.conclusao-chat h2 { margin: 0; color: var(--ink); font-size: clamp(1.15rem, 2.2vw, 1.5rem); }
+.conclusao-icone { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: var(--red-fill); color: #fff; }
+.conclusao-chat .chip { margin-top: 4px; border-color: var(--red-fill); background: var(--red-fill); color: #fff; font-weight: 800; }
+.conclusao-chat .chip:hover { border-color: var(--red-hover); background: var(--red-hover); color: #fff; }
 @media (max-width: 500px) {
   .conducao-estoque-lista li { flex-direction: column; gap: 5px; }
+  .conclusao-chat { grid-template-columns: 1fr; }
 }

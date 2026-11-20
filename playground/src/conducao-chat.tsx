@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { CheckIcon } from "./icons";
 import { IngredientesFicha } from "./ingredientes-ficha";
 import { getAnalises } from "./lib/api";
 import { brl, quantidade } from "./lib/format";
@@ -26,6 +27,21 @@ const PENDENCIAS_DE_MONTAGEM = new Set([
   "tempo_da_receita_pendente",
   "preparo_adaptacao_pendente",
 ]);
+
+export function ConclusaoChat({ temPlano, onConversar }: { temPlano: boolean; onConversar: () => void }) {
+  const tituloId = useId();
+  return (
+    <section className="conducao-chat conclusao-chat" aria-labelledby={tituloId}>
+      <div className="conclusao-icone"><CheckIcon /></div>
+      <div>
+        <h2 id={tituloId}>Parabéns, Dona Maria!</h2>
+        <p>Seu restaurante está configurado. {temPlano ? "Seu plano de divulgação está salvo. " : ""}Bem-vinda ao protótipo iFood e boas vendas!</p>
+        <p>Sou o <strong>Mestre Cuca</strong>, seu agente de IA. Conte comigo para sugerir pratos, acompanhar preços e vendas ou ajustar uma receita.</p>
+        <button type="button" className="chip" onClick={onConversar}>Conversar com Mestre Cuca</button>
+      </div>
+    </section>
+  );
+}
 
 function perguntaDaPendencia(prato: PratoEscolhido): NonNullable<NonNullable<Estado["jornada"]>["pergunta"]> | null {
   const bloqueio = prato.bloqueios?.[0];

@@ -2721,11 +2721,13 @@ def avancar_cardapio_no_turno(store: Store, session_id: str, falas_do_turno: lis
                 linhas.append("Os complementos estão previstos, ainda não são uma compra paga. Quando comprar, me conte os itens e os valores para eu dar entrada na despensa.")
             from . import jornada
 
-            proximos = [p for p in jornada.fichas_em_uso(store.pratos_em_andamento(), jornada.controle(store)) if p["status"] != "aceito"]
-            if proximos:
-                linhas.append(f"Vamos conferir agora o próximo prato escolhido: **{proximos[0]['nome']}**. Vou trazer só a próxima decisão dessa ficha.")
-            else:
-                linhas.append("Seu cardápio está pronto para vender. " + jornada.PERGUNTA_DIVULGACAO)
+            controle = jornada.controle(store)
+            if not controle["configuracao_concluida"]:
+                proximos = [p for p in jornada.fichas_em_uso(store.pratos_em_andamento(), controle) if p["status"] != "aceito"]
+                if proximos:
+                    linhas.append(f"Vamos conferir agora o próximo prato escolhido: **{proximos[0]['nome']}**. Vou trazer só a próxima decisão dessa ficha.")
+                else:
+                    linhas.append("Seu cardápio está pronto para vender. " + jornada.PERGUNTA_DIVULGACAO)
             if registro["alertas"]:
                 linhas.extend(registro["alertas"])
             montagem.registrar_resposta(session_id, linhas, substituir=True, prioridade=40)
@@ -3235,7 +3237,7 @@ def divulgacao_planejar(args: dict, session_id: Optional[str] = None) -> dict:
     padrao = pesquisa.iniciar_analise_divulgacao(session_id or "")
     store = Store()
     etapa = jornada.resumo(store)
-    if etapa["etapa"] != "divulgacao" or etapa["controle"]["divulgacao"] != "interesse":
+    if etapa["etapa"] not in ("divulgacao", "concluido") or etapa["controle"]["divulgacao"] != "interesse":
         mensagem = "Posso fazer a análise de divulgação depois que o cardápio estiver aprovado e você quiser começar."
         if padrao:
             montagem.registrar_resposta(session_id or "", [mensagem], substituir=True, prioridade=20)
@@ -3243,7 +3245,7 @@ def divulgacao_planejar(args: dict, session_id: Optional[str] = None) -> dict:
     if padrao:
         preferencias = divulgacao.parametros_da_conversa(falas.da_sessao(session_id or "") or [])
         resultado, novo = divulgacao.preparar(store, preferencias)
-        mensagem = divulgacao.texto_preparado(resultado, novo)
+        mensagem = divulgacao.texto_preparado(resultado, novo, concluiu_configuracao=novo and etapa["passo"] != "concluido")
         montagem.registrar_resposta(session_id or "", [mensagem], substituir=True, prioridade=20)
         return {"success": True, **resultado, "plano_novo": novo, "diga_a_dona_maria": mensagem}
     if not args and (plano := etapa.get("plano_divulgacao")):

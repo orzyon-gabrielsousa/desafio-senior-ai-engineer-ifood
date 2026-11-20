@@ -297,7 +297,7 @@ export type Estado = {
   pratos_escolhidos?: PratoEscolhido[];
   vendas_resumo?: ResumoVendas;
   jornada?: {
-    etapa: "negocio" | "estoque" | "ajuda" | "proprio" | "pausa" | "pesquisa" | "escolha" | "pendencias" | "aceite" | "preco" | "cardapio" | "revisao" | "divulgacao";
+    etapa: "negocio" | "estoque" | "ajuda" | "proprio" | "pausa" | "pesquisa" | "escolha" | "pendencias" | "aceite" | "preco" | "cardapio" | "revisao" | "divulgacao" | "concluido";
     passo?: PassoJornada;
     concluidas?: Record<PassoJornada, boolean>;
     titulo: string;
@@ -327,7 +327,7 @@ export type Estado = {
   opcoes: { tipos: Opcao[]; alimentacao: Opcao[]; paises: Opcao[]; estados: OpcaoEstado[]; zonas: Opcao[]; cozinha: OpcoesCozinha };
 };
 
-export type PassoJornada = "negocio" | "estoque" | "ajuda" | "montagem" | "divulgacao";
+export type PassoJornada = "negocio" | "estoque" | "ajuda" | "montagem" | "divulgacao" | "concluido";
 export type AcaoJornada = "confirmar_estoque" | "pausar" | "retomar" | "ajuda_ia" | "prato_proprio" | "interesse_divulgacao" | "dispensar_divulgacao";
 
 export type NovoItem = {

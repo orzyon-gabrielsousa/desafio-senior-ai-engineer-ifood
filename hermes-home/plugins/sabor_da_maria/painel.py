@@ -29,8 +29,9 @@ from typing import Any, Optional
 from . import adaptacao_estoque, compras, costing, cozinha, escolhas, falas as falas_mod, guias, jornada, montagem, negocio, pesquisa
 from .falas import MARCA_PAINEL, extrair
 from .store import Store
-from .tools import (_avaliar_prato, _pendencias_perfil, _texto_preparos_caseiros, _texto_saldo, atualizar_declaracoes_do_turno,
-                    avancar_cardapio_no_turno, receita_conferir_ingredientes, registrar_condicoes_do_lote, registrar_troca_confirmada)
+from .tools import (_avaliar_prato, _motivo_pendente, _pendencias_perfil, _texto_preparos_caseiros, _texto_saldo,
+                    atualizar_declaracoes_do_turno, avancar_cardapio_no_turno, divulgacao_planejar,
+                    receita_conferir_ingredientes, registrar_condicoes_do_lote, registrar_troca_confirmada)
 from .units import norm_text
 
 logger = logging.getLogger(__name__)
@@ -488,7 +489,7 @@ def _guardar_para_depois(store: Store, texto: str, sessao: str) -> str | None:
     linhas = [f"Guardei **{prato['nome']}** como rascunho em **Pratos atuais** para você retomar quando quiser."]
     if proxima.get("prato_nome") and proxima.get("prato_id") != prato["id"]:
         linhas.append(f"A próxima ficha em andamento é **{proxima['prato_nome']}**.")
-    elif proxima["etapa"] == "divulgacao":
+    elif proxima["etapa"] in ("divulgacao", "concluido"):
         linhas.append("Agora você pode seguir com os pratos já registrados no cardápio.")
     else:
         linhas.append("Você pode seguir montando outro prato.")
@@ -638,7 +639,7 @@ def _alvo_da_resposta_salva(store: Store, fala: falas_mod.Fala, mudancas: dict[s
     """A resposta validada resolve só a pergunta anterior, nunca um aceite ou uma escolha de receita."""
     pergunta = antes.get("pergunta")
     pendencias = antes.get("pendencias") or []
-    if antes.get("passo") != "montagem":
+    if antes.get("passo") not in ("montagem", "concluido"):
         return None
     literal = norm_text(fala.texto).strip(" .!")
     tecnica = (bool({cozinha.chave_tecnica(n) for n in requisitos_da_ficha["tecnicas"]} & (mudancas.get("tecnicas") or {}).keys())
@@ -770,7 +771,8 @@ def texto_do_painel(store: Optional[Store] = None, primeira_mensagem: bool = Fal
         linhas.append(escolha)
     linhas += _cozinha(store, primeira_mensagem, cadastro_guiado, cadastro_enviado)
     solicitacao = mensagem if mensagem_foco is None else mensagem_foco
-    sobre_divulgacao = (controle_jornada["divulgacao"] == "interesse" and isinstance(solicitacao, str)
+    configurado = controle_jornada["configuracao_concluida"]
+    sobre_divulgacao = ((configurado or controle_jornada["divulgacao"] == "interesse") and isinstance(solicitacao, str)
                         and re.search(r"\b(?:divulgacao|publicidade|anuncios?|anunciar|campanha|investimento)\b", norm_text(solicitacao)))
     novo_prato_pendente = controle_jornada["proprio_pendente"] and not any(
         p["id"] > controle_jornada["ultimo_prato_ao_escolher"] for p in pratos)
@@ -783,6 +785,8 @@ def texto_do_painel(store: Optional[Store] = None, primeira_mensagem: bool = Fal
                     or jornada_atual["etapa"] == "proprio"
                     or jornada.pediu_continuidade(mensagem) or pesquisa.pede_receita(mensagem))
         linhas.append(jornada.contexto(store, conduzir=conduzir, estado=jornada_atual))
+    elif configurado:
+        linhas.append(jornada.INSTRUCAO_CONCLUSAO)
     else:
         linhas.append("Conduza essa ficha pelo chat. Resolva a próxima ação com as ferramentas e pergunte só a decisão ou o dado que faltar; os painéis são apoio opcional.")
     if isinstance(mensagem, str) and compras.pediu_registro(mensagem):
@@ -806,7 +810,7 @@ def texto_do_painel(store: Optional[Store] = None, primeira_mensagem: bool = Fal
     pediu_contas = isinstance(mensagem, str) and re.search(r"\b(?:despesas?|orcamento|saldo)\b", norm_text(mensagem))
     if (jornada_atual["etapa"] in ("aceite", "preco") or pediu_contas) and (skill := guias.gestao_estoque_despesas()):
         linhas.append(skill)
-    if jornada_atual["passo"] == "divulgacao" and jornada_atual["controle"]["divulgacao"] == "interesse":
+    if sobre_divulgacao or (jornada_atual["passo"] == "divulgacao" and controle_jornada["divulgacao"] == "interesse"):
         linhas.append(guias.divulgacao())
     linhas += [
         "Responda sempre em português do Brasil, da primeira à última mensagem, mesmo que a mensagem dela chegue em outro idioma; só mude se ela pedir explicitamente.",
@@ -869,7 +873,7 @@ def ao_iniciar_turno(is_first_turn: bool = False, user_message: Any = None, sess
                     montagem.registrar_resposta(session_id, [
                         f"Use **{rotulo}** se todas as condições listadas se aplicam. Se preferir responder no chat, diga quais você pode confirmar."
                     ], substituir=True, prioridade=20)
-                elif andamento["passo"] == "montagem":
+                elif andamento["passo"] in ("montagem", "concluido"):
                     ficha_da_resposta, retomar_pergunta = _resposta_da_pendencia(store, falas, session_id, condicoes_do_lote,
                                                                                 confirma_grupo=confirma_grupo)
                 resposta_salva = _alvo_da_resposta_salva(store, fala, mudancas, antes, requisitos_da_ficha, prato_explicito)
@@ -912,7 +916,7 @@ def ao_iniciar_turno(is_first_turn: bool = False, user_message: Any = None, sess
                              and not montagem.resposta_preparada(session_id, turn_id))
         estado_jornada = jornada.resumo(store)
         cedo = estado_jornada["passo"] in ("negocio", "estoque", "ajuda")
-        proprio = estado_jornada["etapa"] == "proprio"
+        proprio = estado_jornada["etapa"] == "proprio" or acao_jornada == "prato_proprio"
         ajuda_pedida = jornada.delegou_ajuda(user_message)
         pesquisa_negada = jornada.negou_pesquisa(user_message)
         versao_rapida = None
@@ -961,9 +965,11 @@ def ao_iniciar_turno(is_first_turn: bool = False, user_message: Any = None, sess
                              planejar_divulgacao=acao_jornada == "interesse_divulgacao")
         mensagem_foco = user_message
         if acao_jornada == "interesse_divulgacao":
-            escolha = ("A preparação da divulgação foi delegada neste turno. Chame divulgacao_planejar agora, "
-                       "sem argumentos, para preparar ou retomar o plano com o cardápio aprovado, as vendas registradas e as preferências da conversa. "
-                       "Mostre a conclusão retornada e as ações já preparadas.")
+            plano = json.loads(divulgacao_planejar({}, session_id=session_id))
+            if plano["success"]:
+                escolha = "O plano de divulgação foi preparado neste turno. Mostre a conclusão e as ações já preparadas."
+            else:
+                escolha = "O plano de divulgação ficou pendente. Explique este resultado: " + _motivo_pendente(plano)
         if adaptacao_llm and fala:
             pratos = store.pratos_em_andamento()
             ids = _ids_em_foco(fala.texto, pratos) or _ids_em_foco(fala.resposta_a, pratos)

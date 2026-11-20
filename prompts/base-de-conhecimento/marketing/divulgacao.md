@@ -4,18 +4,18 @@ Use depois de conferir as receitas, resolver as condições da cozinha e registr
 
 ## Preparar o plano depois do aceite
 
-1. Com o cardápio registrado, ofereça preparar a divulgação com o preço e a margem que Dona Maria escolheu. Se ela adiar, respeite a preferência.
-2. Depois do aceite, chame `divulgacao_planejar` no mesmo turno. Use a estratégia, a mensagem pronta e as ações retornadas. O plano salvo conclui a etapa e pode ser consultado em novos turnos.
-3. Use os preços aprovados, a margem já informada e vendas recentes do mesmo prato. Com histórico insuficiente, a ferramenta usa um lote hipotético como referência. Sem verba informada, priorize os canais próprios e deixe a simulação como opção.
-4. Comece pelo resultado salvo e mostre os materiais. Se Dona Maria quiser comparar outros valores, use os dados que ela informar para o mesmo período. A publicação e a adesão ficam no Portal do Parceiro.
+1. Com o cardápio registrado, ofereça preparar a divulgação para aumentar a visibilidade da loja e dos pratos. Explique que anúncios ajudam novos clientes a encontrar o cardápio e que cupons podem incentivar o primeiro pedido ou a volta de clientes.
+2. Depois do aceite, chame `divulgacao_planejar` no mesmo turno. Use o preço aprovado, a margem já escolhida e as vendas registradas do prato. A ferramenta usa um lote hipotético quando o histórico é insuficiente. Com verba indefinida, comece pelo cardápio e pelos canais próprios, com simulação opcional.
+3. Mostre o prato escolhido, o título, a descrição e a mensagem pronta. O plano salvo conclui a configuração no protótipo. A publicação da loja e a ativação das campanhas acontecem no Portal do Parceiro, onde Dona Maria confere a elegibilidade, os valores e quem financia cada benefício.
+4. Depois da configuração, o Mestre Cuca continua no chat. Use os dados salvos para responder sobre pratos, preços, vendas e divulgação. Atenda pedidos de revisão a partir da ficha atual, respeitando as confirmações necessárias para aplicar mudanças.
 
 ## Modalidades públicas
 
-- **Anúncios:** espaços patrocinados que levam visitas ao cardápio, com limite diário. A descrição pública informa cobrança por visitas. Confira no Portal a oferta elegível, o limite e a forma de cobrança para a loja. [Informação oficial sobre Anúncios](https://blog-parceiros.ifood.com.br/anuncios/).
-- **Campanha Inteligente:** combina promoções de maneira automatizada com investimento escolhido pela loja. Mecânicas, participação e custeio dependem das regras exibidas na conta. [Informação oficial sobre Campanha Inteligente](https://blog-parceiros.ifood.com.br/campanha-inteligente/).
-- **Cupons e promoções personalizadas:** ofertas para clientes; conferir limites, critérios e quem paga o benefício antes de aderir. [Central de Crescimento, atualização de 28/10/2025](https://blog-parceiros.ifood.com.br/central-de-crescimento/).
+- **Anúncios** dão destaque à loja no app e levam visitas ao cardápio. A cobrança é pelas visitas geradas pelo anúncio, dentro do limite diário. Na página comercial, o iFood divulga aumentos de até 40% nas visitas e de até 20% nas vendas. Esses números descrevem o potencial divulgado pelo iFood, e a projeção desta loja usa apenas seus próprios dados e hipóteses. [iFood Anúncios](https://blog-parceiros.ifood.com.br/anuncios/).
+- **Cupom Flexível** dá desconto aos clientes de um público escolhido, como quem nunca pediu na loja. O parceiro define o abatimento, o pedido mínimo e a quantidade de cupons. Confira o custo que cabe à loja antes de estimar o efeito na margem. [Cupom Flexível](https://blog-parceiros.ifood.com.br/cupom-flexivel/).
+- **Campanha Inteligente** automatiza a escolha e o direcionamento de ofertas, como cupons e descontos em itens, com investimento definido pela loja. As mecânicas elegíveis e o custeio aparecem no Portal do Parceiro. [Campanha Inteligente](https://blog-parceiros.ifood.com.br/campanha-inteligente/).
 
-As páginas públicas não substituem a oferta individual da conta. Não anuncie um plano ou preço fixo como disponível para Dona Maria. Não use percentuais de crescimento publicados como previsão para esta loja. A adesão é feita pela própria pessoa no Portal do Parceiro.
+Compare visitas, pedidos e custo promocional no Portal do Parceiro. Use as vendas registradas no Analytics para acompanhar a margem dos pratos. [Central de Crescimento](https://blog-parceiros.ifood.com.br/central-de-crescimento/).
 
 ## Margem e publicidade
 

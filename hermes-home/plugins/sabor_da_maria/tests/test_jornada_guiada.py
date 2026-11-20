@@ -154,7 +154,7 @@ class JornadaGuiadaTests(StoreTestCase):
         self.assertEqual(retomada["prato_id"], novo["id"])
         self.assertIsNotNone(self.store.obter_prato(anterior))
 
-    def test_cinco_passos_vem_antes_da_divulgacao_e_preco_e_decisao_separada(self):
+    def test_preco_e_divulgacao_exigem_decisoes_separadas_antes_da_conclusao(self):
         self.assertEqual(jornada.resumo(self.store)["passo"], "negocio")
         self.negocio()
         self.assertEqual(jornada.resumo(self.store)["passo"], "estoque")
@@ -187,6 +187,7 @@ class JornadaGuiadaTests(StoreTestCase):
             atual = jornada.responder(self.store, acao)
             self.assertEqual(atual["controle"]["divulgacao"], esperado)
             self.assertEqual(atual["concluidas"]["divulgacao"], esperado == "dispensada")
+            self.assertEqual(atual["passo"], "concluido" if esperado == "dispensada" else "divulgacao")
             self.assertEqual(self.fotografia(), antes)
             self.assertEqual(self.store.carrinho_resumo(), saldo)
         self.assertEqual(saldo["saldo"], 80)
@@ -205,34 +206,29 @@ class JornadaGuiadaTests(StoreTestCase):
                                                jornada.PERGUNTA_DIVULGACAO + " Quer conferir a despensa primeiro?"))
         criado_em = None
         acao_e_anterior = [("Sim, aprovo.", jornada.PERGUNTA_DIVULGACAO),
-                           ("Sim, pode seguir.", "Posso organizar a divulgação da sua pizza?"),
+                           ("Quero usar o iFood pra publicidade e propaganda.", None),
                            (jornada.PEDIDO_DIVULGACAO, None),
                            ("Analise a divulgação do meu cardápio.", None),
-                           ("Sim, pode simular.", "Quer simular com um valor de investimento e porções previstas?")]
+                           ("Quero divulgar no iFood.", None)]
         for indice, (mensagem, anterior) in enumerate(acao_e_anterior):
             turno = f"divulgacao-{indice}"
             contexto, preparada = self.turno(mensagem, anterior or "", turno=turno)
-            self.assertIn("Chame divulgacao_planejar agora", contexto)
-            self.assertIsNone(preparada)
+            self.assertIn("O plano de divulgação foi preparado neste turno", contexto)
             self.assertEqual(jornada.controle(self.store)["divulgacao"], "interesse")
-            self.assertEqual(pesquisa.ferramenta_da_conducao(sessao), "divulgacao_planejar")
-            requisicao = encerramento.executar(
-                {"tools": [{"type": "function", "function": {"name": "divulgacao_planejar"}}]},
-                lambda req: req, session_id=sessao, turn_id=turno, api_mode="chat_completions")
-            self.assertEqual(requisicao["tool_choice"]["function"]["name"], "divulgacao_planejar")
-            # Os argumentos do modelo não substituem os parâmetros do primeiro cenário padrão.
-            plano = json.loads(tools.divulgacao_planejar({"porcoes": 99, "investimento": 100}, session_id=sessao))
-            self.assertTrue(plano["success"], plano)
+            resposta = encerramento.executar({}, lambda _: self.fail("Preparar o plano independe da inferência."),
+                                              session_id=sessao, turn_id=turno, api_mode="chat_completions")
+            self.assertEqual(resposta.choices[0].message.content, preparada)
+            estado = jornada.resumo(self.store)
+            plano = estado["plano_divulgacao"]
             self.assertEqual(plano["prato"]["id"], prato_id)
             self.assertEqual(plano["volume"]["porcoes"], 2)
             self.assertEqual(plano["campanha"]["investimento"], 0)
-            self.assertEqual(plano["plano_novo"], indice == 0)
             self.assertIsNone(pesquisa.ferramenta_da_conducao(sessao))
-            resposta = montagem.resposta_preparada(sessao, turno)
-            self.assertIn("Mensagem pronta para usar" if indice == 0 else "já está salvo", resposta)
-            self.assertNotIn("Quer simular", resposta)
-            estado = jornada.resumo(self.store)
-            self.assertTrue(estado["concluidas"]["divulgacao"])
+            self.assertIn("Mensagem pronta para usar" if indice == 0 else "já está salvo", preparada)
+            self.assertEqual("Parabéns!" in preparada, indice == 0)
+            self.assertNotIn("Quer simular", preparada)
+            self.assertEqual(estado["etapa"], "concluido")
+            self.assertTrue(all(estado["concluidas"].values()))
             criado_em = criado_em or estado["plano_divulgacao"]["criado_em"]
             self.assertEqual(estado["plano_divulgacao"]["criado_em"], criado_em)
         consultado = json.loads(tools.divulgacao_planejar({}, session_id=sessao))
@@ -243,6 +239,43 @@ class JornadaGuiadaTests(StoreTestCase):
         self.assertNotIn("criado_em", simulado)
         self.assertEqual(self.fotografia(), antes)
         self.assertEqual(self.store.carrinho_resumo(), saldo)
+
+    def test_conclusao_libera_o_chat_e_permanece_ao_criar_rascunho(self):
+        self.negocio()
+        prato_id = self.ficha_viavel(preco=8.50)
+        sessao = "jornada-guiada"
+        self.turno("Quero usar o iFood para publicidade e propaganda.", turno="preparar")
+        plano = json.loads(tools.divulgacao_planejar({}, session_id=sessao))
+        self.assertTrue(plano["success"], plano)
+        criado_em = plano["criado_em"]
+
+        rascunho, = self.store.selecionar_pratos([{"nome": "Pizza de calabresa"}])
+        antes = self.fotografia()
+        atual = api.estado(Store())["jornada"]
+        self.assertEqual(atual["passo"], "concluido")
+        self.assertEqual(atual["plano_divulgacao"]["criado_em"], criado_em)
+        self.assertEqual(atual["prato_id"], rascunho["id"])
+        self.assertIsNone(jornada.acao_da_fala(atual, "Sim, pode seguir.", jornada.PERGUNTA_DIVULGACAO))
+        contexto, preparada = self.turno(f"Quanto custa a porção do prato #{prato_id}?", turno="pergunta-de-preco")
+        self.assertIn("Mestre Cuca", contexto)
+        self.assertIn(f"FICHA EM FOCO: prato #{prato_id}", contexto)
+        self.assertIsNone(preparada)
+        self.assertIsNone(pesquisa.ferramenta_da_conducao(sessao))
+        self.assertEqual(self.fotografia(), antes)
+
+    def test_fim_sem_divulgacao_preserva_possibilidade_de_planejar_depois(self):
+        self.negocio()
+        self.ficha_viavel(preco=8.50)
+        _, pronta = self.turno("Vou deixar a publicidade para depois.", turno="fim-sem-divulgacao")
+        self.assertIn("Parabéns!", pronta)
+        atual = jornada.resumo(Store())
+        self.assertEqual(atual["passo"], "concluido")
+        self.assertNotIn("plano_divulgacao", atual)
+        self.turno("Quero anunciar no iFood.", turno="preparar-depois")
+        plano = json.loads(tools.divulgacao_planejar({}, session_id="jornada-guiada"))
+        self.assertTrue(plano["success"], plano)
+        self.assertNotIn("Parabéns!", plano["diga_a_dona_maria"])
+        self.assertEqual(jornada.resumo(self.store)["passo"], "concluido")
 
     def test_ficha_legada_retoma_ponto_atual_sem_migrar_ou_apagar_dados(self):
         self.negocio()

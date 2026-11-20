@@ -9,6 +9,7 @@ const ETAPAS = [
   { id: "ajuda", titulo: "Escolher caminho", acao: "Escolher como montar", descricao: "Você pode pedir sugestões da IA com receitas reais da internet ou trazer uma ideia de prato. As opções levam em conta seu negócio, sua região e o estoque disponível.", decisao: "Escolha se quer ajuda da IA ou prefere descrever seu próprio prato." },
   { id: "montagem", titulo: "Montar pratos", acao: "Continuar meu prato", descricao: "Montamos uma ficha por vez: ingredientes, quantidades e preparo. A consultora confere sua cozinha, as habilidades e o que falta comprar antes do seu aceite.", decisao: "Confira a proposta. Você pode aceitar, adaptar ou escolher outro prato." },
   { id: "divulgacao", titulo: "Preço e divulgação", acao: "Ver preço e divulgação", descricao: "Compare os custos e os cenários de preço com a taxa de 10% do desafio. Depois de escolher quanto cobrar, você pode pedir à consultora que prepare a divulgação.", decisao: "Você escolhe o preço e decide se quer preparar a divulgação agora." },
+  { id: "concluido", titulo: "Concluído", acao: "Conversar com Mestre Cuca", descricao: "Seu restaurante está configurado no protótipo. O Mestre Cuca continua disponível para ajudar no dia a dia.", decisao: "Use o chat para falar sobre pratos, preços, vendas ou mudanças no cardápio." },
 ] as const;
 
 export type EtapaDoPrato = typeof ETAPAS[number]["id"];
@@ -24,11 +25,12 @@ export function etapasConcluidas(estado: Estado | null): Record<EtapaDoPrato, bo
     ajuda: pratos.length > 0,
     montagem: pratos.some((prato) => (prato.status === "cmv_calculado" || prato.status === "aceito") && !prato.bloqueios?.length),
     divulgacao: pratos.some((prato) => prato.status === "aceito" && !prato.bloqueios?.length),
+    concluido: false,
   };
 }
 
 export function proximaEtapa(concluidas: Record<EtapaDoPrato, boolean>): EtapaDoPrato {
-  return ETAPAS.find((etapa) => !concluidas[etapa.id])?.id ?? "divulgacao";
+  return ETAPAS.find((etapa) => !concluidas[etapa.id])?.id ?? "concluido";
 }
 
 function resumoDaEtapa(etapa: EtapaDoPrato, estado?: Estado | null): string | null {
@@ -61,6 +63,8 @@ function resumoDaEtapa(etapa: EtapaDoPrato, estado?: Estado | null): string | nu
       return aprovados ? `${aprovados} ${aprovados === 1 ? "prato com preço escolhido" : "pratos com preço escolhido"}. Você recebe 90% do preço; o lucro estimado desconta o custo dos ingredientes.`
         : "A consultora apresenta 2–3 cenários. O preço só fica registrado depois da sua escolha.";
     }
+    case "concluido":
+      return estado.jornada?.plano_divulgacao ? "Seu plano de divulgação pode ser consultado na etapa anterior." : null;
   }
 }
 
@@ -90,8 +94,10 @@ export function CaminhoDoPrato({ etapa, etapaAtual, estado, concluidas, escolhaP
   // Com opções na tela a próxima decisão é escolher; "vou pesquisar" mandaria ela de volta para a busca.
   const escolhendo = escolhaPendente && naEtapaAtual && atual.id === "montagem";
   const decisao = escolhendo ? "A consultora já mostrou opções. Escolha uma no chat, peça outra busca ou traga o seu prato."
+    : atual.id === "concluido" ? (futura ? "O chat ficará aberto para dúvidas e sugestões." : atual.decisao)
     : naEtapaAtual ? estado?.jornada?.descricao || atual.decisao : atual.decisao;
   const acao = atual.id === "negocio" && concluidas.negocio ? "Revisar meu negócio"
+    : atual.id === "concluido" || (concluidas.concluido && atual.id === "ajuda") ? "Conversar com Mestre Cuca"
     : escolhendo ? "Pesquisar outras opções"
     : naEtapaAtual && estado?.jornada?.acao ? estado.jornada.acao : atual.acao;
 
@@ -122,7 +128,7 @@ export function CaminhoDoPrato({ etapa, etapaAtual, estado, concluidas, escolhaP
       </nav>
       <div className="dish-path-detail" aria-labelledby={detalheId}>
         <h3 id={detalheId}>{futura ? "O que vem a seguir" : "Sobre esta etapa"}</h3>
-        <p>{atual.descricao}</p>
+        <p>{atual.id === "concluido" && futura ? "Ao concluir a divulgação, seu restaurante estará configurado." : atual.descricao}</p>
         {resumo ? <p className="dish-path-summary">{resumo}</p> : null}
         <p className="dish-path-decision">{decisao}</p>
         {futura ? <p className="dish-path-wait">Seguimos para cá depois de concluir {ETAPAS[indexEmCurso].titulo.toLocaleLowerCase("pt-BR")}.</p>

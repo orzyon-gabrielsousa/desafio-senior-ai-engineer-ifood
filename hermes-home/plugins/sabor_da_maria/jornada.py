@@ -16,6 +16,17 @@ from .units import norm_text
 
 PERGUNTA_DIVULGACAO = "Quer que eu prepare a divulgação do seu cardápio com o preço e a margem que você escolheu?"
 PEDIDO_DIVULGACAO = "Prepare a divulgação do meu cardápio."
+MENSAGEM_CONCLUSAO = (
+    "**Parabéns! Seu restaurante está configurado.** Bem-vinda ao protótipo para o iFood e boas vendas! "
+    "Eu sou o **Mestre Cuca**. Você pode contar comigo aqui no chat para conversar sobre pratos, preços, vendas ou ideias para o seu cardápio."
+)
+INSTRUCAO_CONCLUSAO = (
+    "O restaurante já foi configurado. Você é Mestre Cuca e conversa livremente: responda ao pedido atual, "
+    "consulte as ferramentas para perguntas sobre receitas, preços, vendas e estoque, e ajude com sugestões quando ela pedir. "
+    "Não repita as boas-vindas nem retome as etapas de cadastro e divulgação sem pedido. "
+    "Mencionar ou perguntar sobre uma ficha não autoriza alterá-la. Se ela pedir uma troca, preserve a versão atual "
+    "enquanto propõe e confere a nova versão. Para registrar mudanças, mantenha as validações e as decisões de aceite e preço."
+)
 PERGUNTA_RENDIMENTO = "Quantas porções este lote rende?"
 
 
@@ -362,7 +373,7 @@ def _resumo_das_fichas(store: Store, *, pratos: list[dict[str, Any]] | None = No
             "instrucao_agente": "O negócio está conhecido e ainda não há ficha aberta. Conduza a pesquisa de uma receita real com o estoque disponível. Não devolva 'qual prato você quer?' nem exija completar todos os equipamentos e técnicas antes de pesquisar. Apresente uma versão e confira somente os requisitos dela antes do aceite."}
 
 
-PASSOS = ("negocio", "estoque", "ajuda", "montagem", "divulgacao")
+PASSOS = ("negocio", "estoque", "ajuda", "montagem", "divulgacao", "concluido")
 CHAVE_CONTROLE = "jornada_guiada_v1"
 
 
@@ -374,12 +385,18 @@ def controle(store: Store, *, pratos: list[dict[str, Any]] | None = None) -> dic
     """
     with store.connect() as conn:
         bruto = store._config_get(conn, CHAVE_CONTROLE)
-    salvo = json.loads(bruto) if bruto else {}
+        salvo = json.loads(bruto) if bruto else {}
+        concluida = salvo.get("configuracao_concluida", salvo.get("divulgacao") == "dispensada")
+        if "configuracao_concluida" not in salvo and salvo.get("divulgacao") == "interesse":
+            from .divulgacao import _CHAVE_PLANO
+
+            concluida = bool(store._config_get(conn, _CHAVE_PLANO))
     legado = not bruto and bool(pratos if pratos is not None else store.pratos_em_andamento())
     return {"estoque_confirmado": bool(salvo.get("estoque_confirmado", legado)),
             "pausado": bool(salvo.get("pausado", False)),
             "ajuda": salvo.get("ajuda", "ia" if legado else "") if salvo.get("ajuda", "ia" if legado else "") in ("", "ia", "proprio") else "",
             "divulgacao": salvo.get("divulgacao", "") if salvo.get("divulgacao", "") in ("", "interesse", "dispensada") else "",
+            "configuracao_concluida": bool(concluida),
             "proprio_pendente": bool(salvo.get("proprio_pendente", False)),
             "ultimo_prato_ao_escolher": int(salvo.get("ultimo_prato_ao_escolher", 0)),
             "selecao_atual": [i for i in salvo.get("selecao_atual", []) if type(i) is int and i > 0],
@@ -404,6 +421,10 @@ def fichas_em_uso(pratos: list[dict[str, Any]], estado: dict[str, Any]) -> list[
     # liberar reservas de pratos aprovados. Elas continuam na tela Minha cozinha.
     return [p for p in pratos if p["status"] == "aceito" or (p["id"] not in estado.get("rascunhos_adiados", []) and
             (estado["ajuda"] != "proprio" or p["id"] > estado["ultimo_prato_ao_escolher"] or p["id"] in estado.get("selecao_atual", [])))]
+
+
+def pratos_divulgaveis(pratos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [p for p in pratos if p["status"] == "aceito" and not p.get("bloqueios")]
 
 
 def continuar_escolhas(store: Store, ids: list[int]) -> None:
@@ -479,15 +500,27 @@ def resumo(store: Store, *, pratos: list[dict[str, Any]] | None = None) -> dict[
     pend_negocio = negocio.pendencias(store.negocio())
     analises = {a["prato_id"] for a in store.analises_preco()}
     montados = bool(ativos) and all((p["status"] == "aceito" or p["id"] in analises) and not p.get("bloqueios") for p in ativos)
-    publicados = bool(ativos) and all(p["status"] == "aceito" and not p.get("bloqueios") for p in ativos)
+    divulgaveis = pratos_divulgaveis(ativos)
+    publicados = bool(ativos) and len(divulgaveis) == len(ativos)
     plano = None
-    if publicados and estado["divulgacao"] == "interesse":
+    if divulgaveis and estado["divulgacao"] == "interesse":
         from .divulgacao import plano_atual
 
-        plano = plano_atual(store, ativos)
+        plano = plano_atual(store, divulgaveis)
+    concluida = estado["configuracao_concluida"]
     concluidas = {"negocio": not pend_negocio, "estoque": estado["estoque_confirmado"], "ajuda": bool(estado["ajuda"]),
-                  "montagem": montados, "divulgacao": publicados and (bool(plano) or estado["divulgacao"] == "dispensada")}
+                  "montagem": montados, "divulgacao": concluida, "concluido": concluida}
     comum = {"controle": estado, "concluidas": concluidas, "pendencias": [], "pratos_ativos": [p["id"] for p in ativos]}
+    ordem = sorted(ativos, key=lambda p: (p["status"] == "aceito", p["id"] in analises))
+    if concluida:
+        ficha = _resumo_das_fichas(store, pratos=ordem)
+        retomada = {chave: ficha[chave] for chave in ("prato_id", "prato_nome", "pendencias", "pergunta", "pergunta_esgotada")
+                    if chave in ficha and not estado["proprio_pendente"]}
+        return {**comum, **retomada, "concluidas": dict.fromkeys(PASSOS, True),
+                "passo": "concluido", "etapa": "concluido", "titulo": "Restaurante configurado",
+                "descricao": "Converse com o Mestre Cuca sobre pratos, preços, vendas e ideias para o cardápio.",
+                "acao": "Conversar com o Mestre Cuca", "mensagem": "", "instrucao_agente": INSTRUCAO_CONCLUSAO,
+                **({"plano_divulgacao": plano} if plano else {})}
     if pend_negocio and not pratos:
         primeiro = pend_negocio[0]
         return {**comum, "passo": "negocio", "etapa": "negocio", "titulo": "Vamos conhecer seu negócio",
@@ -523,7 +556,6 @@ def resumo(store: Store, *, pratos: list[dict[str, Any]] | None = None) -> dict[
                 "instrucao_agente": "Ela escolheu criar o próprio prato. Se ainda não descreveu prato ou ingrediente, faça só essa pergunta. Se a mensagem atual já descreve o que quer, monte a nova ficha a partir desse pedido; não repita a pergunta inicial. Preserve as fichas anteriores. A pesquisa real pode apoiar a versão e suas técnicas, sem substituir a escolha dela. Não aceite nem debite automaticamente."}
     # Conclua a montagem das versões escolhidas antes de abrir os preços. A
     # ordem das fichas é trabalho operacional, não aceite pela pessoa.
-    ordem = sorted(ativos, key=lambda p: (p["status"] == "aceito", p["id"] in analises))
     fichas = _resumo_das_fichas(store, pratos=ordem)
     passo = "divulgacao" if fichas["etapa"] in ("preco", "cardapio") else "montagem"
     if publicados:
@@ -534,19 +566,10 @@ def resumo(store: Store, *, pratos: list[dict[str, Any]] | None = None) -> dict[
                       _opcao("Preparar divulgação", "interesse_divulgacao", PEDIDO_DIVULGACAO),
                       _opcao("Agora não", "dispensar_divulgacao", "Não quero planejar divulgação agora.")]},
                   "instrucao_agente": "Os pratos estão registrados e a escolha de preço terminou. Resuma o resultado e pergunte se ela quer conhecer divulgação. É opcional. Só mostre modalidades oficiais verificadas; disponibilidade e investimento são conferidos no Portal do Parceiro. Nunca contrate campanha, prometa ranqueamento nem retire verba dos R$ 80 de complementos."}
-        if estado["divulgacao"]:
-            fichas["pergunta"] = None
-            if estado["divulgacao"] == "interesse":
-                fichas["descricao"] = "A consultora usa o cardápio, a margem e as vendas registradas para montar a divulgação."
-            fichas["instrucao_agente"] = ("Ela preferiu deixar a divulgação para depois. Respeite e não ofereça novamente em cada resposta. O cardápio e os preços continuam salvos."
-                                          if estado["divulgacao"] == "dispensada" else
-                                          "Ela autorizou preparar o plano de divulgação. Use divulgacao_planejar para concluir ou mostrar o plano já salvo. Se ela indicar outros valores, use os dados informados. "
+        if estado["divulgacao"] == "interesse":
+            fichas.update(pergunta=None, descricao="A consultora usa o cardápio, a margem e as vendas registradas para montar a divulgação.",
+                          instrucao_agente="Ela autorizou preparar o plano de divulgação. Use divulgacao_planejar para concluir. "
                                           "O plano local reúne ações, materiais e margem. A adesão a campanhas fica no Portal do Parceiro.")
-        if plano:
-            fichas.update(titulo="Divulgação preparada", acao="Ver plano de divulgação", plano_divulgacao=plano,
-                          descricao="Os materiais, a estimativa de investimento e os próximos passos estão salvos.",
-                          instrucao_agente="A etapa 5 já foi concluída e o plano está salvo. Responda sobre o plano quando ela pedir. "
-                                          "Use divulgacao_planejar para consultar ou simular com novos dados informados por ela.")
     elif fichas["etapa"] == "pesquisa":
         fichas = {**fichas, "acao": "Pesquisar opções de pratos",
                   "mensagem": "Quero sua ajuda. Pesquise receitas reais para o meu negócio com o estoque disponível. Apresente poucas opções com fonte e custos, para eu escolher antes de montar a ficha.",
@@ -584,9 +607,12 @@ def responder(store: Store, acao: str) -> dict[str, Any]:
             dados["ultimo_prato_ao_escolher"] = max((p["id"] for p in store.pratos_em_andamento()), default=0)
         else:
             pratos = fichas_em_uso(pratos_atuais(store), dados)
-            if not pratos or any(p["status"] != "aceito" or p.get("bloqueios") for p in pratos):
+            divulgaveis = pratos_divulgaveis(pratos)
+            if not divulgaveis or (not dados["configuracao_concluida"] and len(divulgaveis) != len(pratos)):
                 raise ValueError("vamos concluir os pratos viáveis e escolher os preços antes da divulgação")
             dados["divulgacao"] = "interesse" if acao == "interesse_divulgacao" else "dispensada"
+            if acao == "dispensar_divulgacao":
+                dados["configuracao_concluida"] = True
         store._config_set(conn, CHAVE_CONTROLE, json.dumps(dados, ensure_ascii=False))
     return resumo(store)
 
@@ -635,7 +661,7 @@ def acao_da_fala(estado: dict[str, Any], texto: str, anterior: str = "") -> str 
                 delegou_ajuda(texto)
                 or not negou_pesquisa(texto) and re.fullmatch(r"(?:pesquise|procure|busque|monte|monta)(?: um prato| uma receita)(?: para mim| para meu cardapio)?", atual)):
             return "ajuda_ia"
-    if estado["etapa"] == "divulgacao":
+    if estado["etapa"] in ("divulgacao", "concluido"):
         pergunta_recente = re.split(r"[.!?]", anterior.rsplit("?", 1)[0])[-1] if "?" in anterior else ""
         convite_atual = norm_text(pergunta_recente)
         convite = any(p in convite_atual for p in ("quer conhecer as opcoes de divulgacao do ifood",
@@ -652,7 +678,14 @@ def acao_da_fala(estado: dict[str, Any], texto: str, anterior: str = "") -> str 
             r"(?:prepare|preparar|analise|analisar|monte|montar|faca|fazer|aprovo|autorizo) "
             r"(?:o plano de |a |o )?(?:divulgacao|marketing)\b|"
             r"^(?:(?:agora|ok|beleza|sim) )*(?:(?:pode|vamos) divulgar|divulgue)\b", atual))
-        if pediu_plano or atual.startswith("quero conhecer as opcoes de divulgacao") or confirmou and (convite or convite_antigo):
+        quer_anunciar = bool(re.fullmatch(
+            r"(?:(?:sim|ok|beleza) )*(?:eu )?quero (?:anunciar no ifood|divulgar (?:meu restaurante |meu cardapio |minha loja )?no ifood|"
+            r"usar (?:o )?ifood (?:pra|para) (?:divulgacao|publicidade|propaganda)(?: e (?:divulgacao|publicidade|propaganda))?)", atual))
+        if pediu_plano or quer_anunciar:
+            return "interesse_divulgacao"
+        if estado["etapa"] == "concluido":
+            return None
+        if atual.startswith("quero conhecer as opcoes de divulgacao") or confirmou and (convite or convite_antigo):
             return "interesse_divulgacao"
         if atual in ("nao quero planejar divulgacao agora", "nao quero divulgacao", "agora nao quero publicidade",
                      "vou deixar a publicidade para depois") or simples_nao and (convite or convite_antigo):
@@ -676,8 +709,10 @@ def resposta_curta(store: Store, estado: dict[str, Any] | None = None) -> str:
                 f"A lista completa está logo abaixo. Você tem {costing.brl(saldo)} disponíveis para compras novas. Ao aceitar um prato, o custo do lote entra nas despesas. " + atual["pergunta"]["texto"])
     if atual["etapa"] == "ajuda":
         return atual["descricao"] + " " + atual["pergunta"]["texto"]
-    if atual["etapa"] == "proprio":
+    if atual["etapa"] == "proprio" or atual["controle"]["proprio_pendente"]:
         return "Vamos montar do seu jeito. Qual prato você tem em mente, ou qual ingrediente quer usar?"
+    if atual["etapa"] == "concluido":
+        return MENSAGEM_CONCLUSAO
     if atual["etapa"] == "divulgacao":
         escolha = atual["controle"]["divulgacao"]
         if escolha == "dispensada":
@@ -690,6 +725,8 @@ def resposta_curta(store: Store, estado: dict[str, Any] | None = None) -> str:
 
 def contexto(store: Store, *, conduzir: bool = True, estado: dict[str, Any] | None = None) -> str:
     estado = estado or resumo(store)
+    if estado["etapa"] == "concluido":
+        return "RESTAURANTE CONFIGURADO (estado salvo): " + INSTRUCAO_CONCLUSAO
     if not conduzir:
         return ("CONDUÇÃO DA JORNADA (estado atual; não é fala nem confirmação da pessoa):\n"
                 f"Próxima etapa disponível: {estado['etapa']}. {estado['titulo']}. "
