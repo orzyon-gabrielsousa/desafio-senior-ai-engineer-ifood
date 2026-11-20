@@ -272,10 +272,10 @@ export function ConducaoChat({ estado, bloqueado, versao, sugestoes, onEnviar, o
               {podeMontarComEstoque ? <button type="button" className="chip" disabled={ocupado} onClick={() => {
                 const mensagem = `Monte a ficha do prato #${prato.id} com o estoque disponível.`;
                 onEnviar(mensagem);
-              }}>Montar com meu estoque</button> : null}
+              }}>Montar com meu estoque (adaptação de ingredientes)</button> : null}
               {podeGuardarParaDepois ? <button type="button" className="chip" disabled={ocupado} onClick={() => {
                 onEnviar(`Quero guardar «${prato.nome}» para depois.`, `Deixe o prato #${prato.id} como rascunho para depois.`);
-              }}>Guardar para depois</button> : null}
+              }}>Guardar para depois (pular o prato)</button> : null}
             </div> : null}
             {pergunta ? <div className="conducao-pergunta" role="group" aria-label={pergunta.texto}>
               <p className="conducao-pergunta-texto"><strong>{pergunta.texto}</strong></p>
@@ -315,7 +315,7 @@ export function ConducaoChat({ estado, bloqueado, versao, sugestoes, onEnviar, o
                   `Aceito preparar «${prato.nome}» nessa versão, sem impedimentos. Mostre os cenários para eu escolher o preço.`,
                   `Aceito preparar o prato #${prato.id} (${prato.nome}) nessa versão, sem impedimentos. Confira a viabilidade e mostre os cenários para eu escolher o preço.`)}>Usar este prato</button> : null}
                 <button type="button" className="chip" disabled={ocupado} onClick={() => void escolher("prato_proprio", "Quero montar meu próprio prato.",
-                  "Quero montar meu próprio prato. Preserve as fichas anteriores e pergunte qual prato ou ingrediente tenho em mente antes de criar a nova ficha.")}>Quero montar meu prato</button>
+                  "Quero montar meu próprio prato. Preserve as fichas anteriores e pergunte qual prato ou ingrediente tenho em mente antes de criar a nova ficha.")}>Quero montar meu prato (montar sem IA)</button>
               </div>
             ) : null}
             {conferirFonte && !pergunta ? <p className="conducao-dica">A consultora confere o preparo primeiro e reúne as confirmações da cozinha que ainda faltarem.</p> : null}

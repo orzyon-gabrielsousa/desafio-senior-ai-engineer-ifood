@@ -63,7 +63,7 @@ export function situacaoDoPrato(prato: PratoEscolhido): SituacaoPrato {
     descricao: "Sua escolha está salva. A consultora pode revisar a ficha com a receita original e o estoque disponível.",
   };
   if (temPendencias && prato.ingredientes_faltantes?.some(({ estado }) => estado === "faltando")) return {
-    etapa: "pendente", titulo: "Salvo com faltantes", tom: "atencao", destino: "chat", acao: "Continuar a montagem",
+    etapa: "pendente", titulo: "Salvo com faltantes", tom: "atencao", destino: "chat", acao: "Continuar a montagem (resolver depois)",
     descricao: "O prato está salvo. Podemos pesquisar o preço do que falta ou adaptar o preparo ao seu estoque.",
   };
   if (temPendencias) return {
