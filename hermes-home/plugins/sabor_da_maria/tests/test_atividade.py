@@ -27,6 +27,13 @@ PAGINA = {"results": [{
 
 
 class TestFrasePorFerramenta(unittest.TestCase):
+    def test_ficha_parcial_sem_cmv_continua_aparecendo_na_atividade(self):
+        resultado = {"success": True, "receita": "Frango", "veredito": "precisa_confirmar",
+                     "resumo": {"cmv_previa": None, "compras_total_estimado": 0}, "ingredientes": []}
+        descricao = atividade.descrever("receita_conferir_ingredientes", {}, json.dumps(resultado))
+        self.assertIn("precisa confirmar", descricao["resumo"])
+        self.assertNotIn("custo da receita", descricao["resumo"])
+
     def test_busca_na_internet_diz_quantos_resultados_e_de_onde(self):
         d = atividade.descrever("web_search", {"query": "receita de frango com batata"}, json.dumps(BUSCA))
         self.assertEqual(d["titulo"], "Pesquisou na internet")

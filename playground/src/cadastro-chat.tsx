@@ -7,8 +7,8 @@ import "./cadastro-chat.css";
 export type TipoCadastro = "negocio" | "cozinha";
 
 const ETAPAS_COZINHA = ["Equipamentos", "Utensílios", "Técnicas", "Rotina"];
-const ETAPAS_NEGOCIO = ["Atividade", "Localização"];
-const NEGOCIO_VAZIO: Negocio = { tipo: "", alimentacao: [], pais: "Brasil", estado: "", cidade: "", zona: "" };
+const ETAPAS_NEGOCIO = ["Atividade", "Comida", "Localização", "Objetivo"];
+const NEGOCIO_VAZIO: Negocio = { tipo: "", alimentacao: [], pais: "Brasil", estado: "", cidade: "", zona: "", objetivo: "" };
 const ROTULO_NIVEL: Record<Nivel, string> = { sim: "Sei fazer", aprendendo: "Aprendendo", nao: "Não sei" };
 
 export function cadastroPedido(texto: string): TipoCadastro | null {
@@ -101,7 +101,7 @@ function Formulario({ titulo, etapas, etapa, setEtapa, bloqueado, podeEnviar, on
         <h2 id={id} ref={tituloRef} tabIndex={-1}>{titulo}</h2>
         <span>{etapa + 1} de {etapas.length}</span>
       </header>
-      <fieldset className="cadastro-campos" disabled={salvando}>
+      <fieldset className="cadastro-campos" disabled={ocupado}>
         <legend>{etapas[etapa]}</legend>
         {children}
       </fieldset>
@@ -111,8 +111,8 @@ function Formulario({ titulo, etapas, etapa, setEtapa, bloqueado, podeEnviar, on
         {etapa > 0 ? (
           <button className="cadastro-secundario" type="button" disabled={salvando} onClick={() => irPara(etapa - 1)}>Voltar</button>
         ) : null}
-        {podeEnviar || ultima ? (
-          <button className={ultima ? "primary" : "cadastro-secundario"} type="submit" disabled={ocupado || !podeEnviar}>
+        {ultima ? (
+          <button className="primary" type="submit" disabled={ocupado || !podeEnviar}>
             {salvando ? "Salvando…" : "Enviar respostas"}
           </button>
         ) : null}
@@ -135,6 +135,7 @@ function CadastroCozinha({ estado, bloqueado, onSave, onClose }: {
   const [modoNivel, setModoNivel] = useState<Nivel>("sim");
   const [rascunho, setRascunho] = useState<NovaCozinha>({});
   const salvo = estado.cozinha;
+  const faixaDeTempo = salvo.outros.find(({ grupo, chave }) => grupo === "restricoes" && chave === "tempo_por_cozinhada_faixa");
   const equipamento = (id: string) => (id in (rascunho.equipamentos ?? {}) ? rascunho.equipamentos?.[id] : salvo.equipamentos[id]);
   const habilidade = (id: string) => (id in (rascunho.habilidades ?? {}) ? rascunho.habilidades?.[id] : salvo.habilidades[id]);
   const rotina = (id: string) => (id in (rascunho.rotina ?? {}) ? rascunho.rotina?.[id] : salvo.rotina[id]);
@@ -213,6 +214,8 @@ function CadastroCozinha({ estado, bloqueado, onSave, onClose }: {
         opcoes.rotina.map((campo) => (
           <div key={campo.id} className="cadastro-grupo" role="group" aria-label={campo.label}>
             <strong>{campo.label}</strong>
+            {campo.id === "tempo_por_cozinhada_min" && !rotina(campo.id) && faixaDeTempo
+              ? <p className="cadastro-dica">Informado no chat: {faixaDeTempo.texto}. Você pode manter essa resposta ou escolher outro tempo.</p> : null}
             <div className="toggle-chips">
               {campo.opcoes.map(({ valor, label }) => (
                 <Chip key={valor} marcado={rotina(campo.id) === valor} onClick={() => mudarRotina(campo.id, rotina(campo.id) === valor ? null : valor)}>{label}</Chip>
@@ -228,7 +231,7 @@ function CadastroCozinha({ estado, bloqueado, onSave, onClose }: {
 function CadastroNegocio({ estado, bloqueado, onSave, onClose }: {
   estado: Estado; bloqueado: boolean; onSave: (campos: Partial<Negocio>) => Acao; onClose: () => void;
 }) {
-  const [etapa, setEtapa] = useState(() => estado.negocio?.tipo && estado.negocio.alimentacao.length ? 1 : 0);
+  const [etapa, setEtapa] = useState(() => !estado.negocio?.tipo ? 0 : !estado.negocio.alimentacao.length ? 1 : !estado.negocio.estado || !estado.negocio.cidade ? 2 : 3);
   const [mudancas, setMudancas] = useState<Partial<Negocio>>({});
   const form = { ...NEGOCIO_VAZIO, ...estado.negocio, ...mudancas };
   const mudar = (parte: Partial<Negocio>) => setMudancas((atual) => ({ ...atual, ...parte }));
@@ -239,6 +242,7 @@ function CadastroNegocio({ estado, bloqueado, onSave, onClose }: {
       bloqueado={bloqueado} podeEnviar={Object.keys(mudancas).length > 0} onSave={() => onSave(mudancas)} onClose={onClose}>
       {etapa === 0 ? (
         <>
+          <p className="cadastro-dica">Primeiro, que tipo de negócio você tem?</p>
           <label className="field">
             <span>Tipo de negócio</span>
             <select value={form.tipo} onChange={(event) => mudar({ tipo: event.target.value })}>
@@ -246,6 +250,8 @@ function CadastroNegocio({ estado, bloqueado, onSave, onClose }: {
               {opcoes.tipos.map((opcao) => <option key={opcao.id} value={opcao.id}>{opcao.label}</option>)}
             </select>
           </label>
+        </>
+      ) : etapa === 1 ? (
           <div className="cadastro-grupo" role="group" aria-label="Tipo de alimentação">
             <strong>Que tipo de comida você serve?</strong>
             <div className="toggle-chips">
@@ -258,8 +264,7 @@ function CadastroNegocio({ estado, bloqueado, onSave, onClose }: {
               ))}
             </div>
           </div>
-        </>
-      ) : (
+      ) : etapa === 2 ? (
         <div className="cadastro-local">
           <label className="field">
             <span>Estado</span>
@@ -280,6 +285,14 @@ function CadastroNegocio({ estado, bloqueado, onSave, onClose }: {
             </select>
           </label>
         </div>
+      ) : (
+        <>
+          <label className="field">
+            <span>O que você quer alcançar com seu cardápio?</span>
+            <input value={form.objetivo ?? ""} maxLength={240} placeholder="Ex.: começar a vender marmitas com lucro" onChange={(event) => mudar({ objetivo: event.target.value })} />
+          </label>
+          <p className="cadastro-dica">Seu orçamento inicial para complementos é de R$ 80,00. Vou ajudar a aproveitar os ingredientes que você já tem. O objetivo é opcional e pode ser ajustado depois.</p>
+        </>
       )}
     </Formulario>
   );

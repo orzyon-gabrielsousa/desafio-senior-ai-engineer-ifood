@@ -33,6 +33,7 @@ hermes-home/workspace/*
 # playground (React)
 playground/node_modules/
 playground/dist/
+playground/*.tsbuildinfo
 
 # python
 __pycache__/

@@ -54,6 +54,38 @@ class ExtracaoTests(unittest.TestCase):
         self.assertEqual(falas.extrair(historico)[0].texto, "Tenho forno")
 
 
+class BocasDeclaradasTests(unittest.TestCase):
+    PERGUNTA = "Quantas bocas do seu fogão estão funcionando para este preparo?"
+
+    def fala(self, texto, pergunta=""):
+        return falas.extrair([{"role": "assistant", "content": pergunta}], texto)[-1]
+
+    def test_numero_curto_so_responde_a_pergunta_de_bocas(self):
+        for texto, esperado in (("6", 6), ("seis", 6), ("4 bocas", 4), ("Tenho 2", 2), ("0", 0)):
+            with self.subTest(texto=texto):
+                self.assertEqual(falas.bocas_fogao_declaradas(self.fala(texto, self.PERGUNTA)), esperado)
+                for pergunta in ("", "Você tem forno?", "Qual opção de receita você escolhe?"):
+                    self.assertIsNone(falas.bocas_fogao_declaradas(self.fala(texto, pergunta)))
+
+    def test_declaracao_explicitamente_identifica_fogao_sem_historico(self):
+        for texto, esperado in (("Meu fogão tem seis bocas.", 6),
+                                ("Tenho fogão de 4 bocas.", 4),
+                                ("Tenho 6 bocas funcionando no meu fogão. Continue o prato #1.", 6)):
+            with self.subTest(texto=texto):
+                self.assertEqual(falas.bocas_fogao_declaradas(self.fala(texto)), esperado)
+
+    def test_ressalvas_numeros_invalidos_e_citacoes_nao_declaram_capacidade(self):
+        for texto in ("talvez 6", "6?", "-6", "6,5", "6.5", "4 ou 6", "Não tenho 6 bocas",
+                      '"6"', "> 6", "6, mas duas não funcionam", "Se eu tivesse 6 bocas", "6. Pesquise outra pizza."):
+            with self.subTest(texto=texto):
+                self.assertIsNone(falas.bocas_fogao_declaradas(self.fala(texto, self.PERGUNTA)))
+
+    def test_formulario_com_varias_perguntas_nao_contextualiza_numero(self):
+        pergunta = self.PERGUNTA + " Você tem forno?"
+        self.assertIsNone(falas.bocas_fogao_declaradas(self.fala("6", pergunta)))
+        self.assertIsNone(falas.bocas_fogao_declaradas(self.fala("6", falas.MARCA_PAINEL + " " + self.PERGUNTA)))
+
+
 class ApoioTests(unittest.TestCase):
     def setUp(self):
         self.dela = falas.extrair([{"role": "user", "content": "Faço molhos brancos e assados, mas massa fresca nunca fiz. Uso a panela de pressão."}])
@@ -215,13 +247,16 @@ class HooksTests(unittest.TestCase):
     def test_plugin_registra_os_hooks(self):
         class Contexto:
             def __init__(self):
-                self.hooks, self.tools = [], []
+                self.hooks, self.tools, self.middleware = [], [], []
 
             def register_tool(self, **kwargs):
                 self.tools.append(kwargs["name"])
 
             def register_hook(self, nome, callback):
                 self.hooks.append((nome, callback))
+
+            def register_middleware(self, nome, callback):
+                self.middleware.append((nome, callback))
 
             def register_web_search_provider(self, provider):
                 pass
@@ -235,11 +270,14 @@ class HooksTests(unittest.TestCase):
         self.assertEqual([(n, c.__module__.rsplit(".", 1)[-1]) for n, c in ctx.hooks], [
             ("pre_llm_call", "falas"), ("pre_llm_call", "painel"),  # falas dela e painel do turno (com o roteiro da pesquisa de receitas)
             ("pre_llm_call", "memoria"), ("post_llm_call", "memoria"),
+            ("pre_tool_call", "pesquisa"),
             ("post_tool_call", "falas"), ("post_tool_call", "atividade"),  # resposta do clarify e passo a passo da consultora
-            ("transform_tool_result", "pesquisa")])  # próximo passo no resultado da busca de receita
+            ("transform_tool_result", "pesquisa"), ("transform_llm_output", "montagem")])
         self.assertEqual(set(ctx.tools), set(tools.SCHEMAS))
         self.assertIn("analytics_analises_consultar", ctx.tools)
         self.assertNotIn("analytics_consultar", ctx.tools)
+        self.assertEqual([(n, c.__module__.rsplit(".", 1)[-1]) for n, c in ctx.middleware],
+                         [("llm_execution", "encerramento")])
 
 
 if __name__ == "__main__":

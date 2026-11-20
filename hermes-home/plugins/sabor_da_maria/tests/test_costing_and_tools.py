@@ -8,18 +8,58 @@ from ._base import FALA_COZINHA, SESSAO, StoreTestCase, diz
 
 
 class CostingTests(unittest.TestCase):
-    def test_comissao_pagamento_impostos_e_sobra_por_porcao(self):
-        perfil = taxas.normalizar({"plano": "entrega", "imposto": 0.04})
-        aval = costing.avaliar_preco(100, 20, perfil=perfil)
-        self.assertEqual([aval[k] for k in ("taxa_comissao", "taxa_pagamento", "impostos", "repasse_ifood", "recebe_liquido", "lucro")],
-                         [23, 3.2, 4, 73.8, 69.8, 49.8])
-        self.assertEqual(aval["margem_sobre_liquido"], round(49.8 / 69.8, 4))
-        minimo = costing.cenarios_preco(20, perfil=perfil)
-        self.assertLess(costing.avaliar_preco(minimo["preco_minimo"] - 0.01, 20, perfil=perfil)["lucro"], 0)
-        self.assertGreaterEqual(costing.avaliar_preco(minimo["preco_minimo"], 20, perfil=perfil)["lucro"], 0)
-        self.assertGreater(costing.avaliar_preco(minimo["preco_minimo_com_sobra"], 20, perfil=perfil)["lucro"], 0)
-        presencial = costing.avaliar_preco(100, 20, perfil={**perfil, "pagamento_online": False})
-        self.assertEqual((presencial["taxa_pagamento"], presencial["recebe_liquido"]), (0, 73))
+    def test_regra_do_desafio_prevalece_sobre_perfis_legados_e_taxas_avulsas(self):
+        for dados in ({}, {"plano": "basico"}, {"plano": "entrega", "imposto": 0.04},
+                      {"plano": "personalizado", "comissao": 0.30, "pagamento": 0.032, "imposto": 0.10}):
+            with self.subTest(dados=dados):
+                perfil = taxas.normalizar(dados)
+                self.assertEqual(perfil, {"plano": "desafio", "comissao": 0.10, "pagamento": 0.0,
+                                          "pagamento_online": False, "imposto": 0.0})
+                aval = costing.avaliar_preco(100, 20, taxa=0.85, perfil=dados)
+                self.assertEqual([aval[k] for k in ("taxa_comissao", "taxa_pagamento", "impostos", "repasse_ifood", "recebe_liquido", "lucro")],
+                                 [10, 0, 0, 90, 90, 70])
+                self.assertEqual(costing.cenarios_preco(9, taxa=0.85, perfil=dados)["preco_minimo"], 10)
+        self.assertEqual(costing.avaliar_preco(100, 20, taxa=0.85)["lucro"], 70)
+        self.assertEqual(costing.preco_minimo(9, taxa=0.85), 10)
+
+    def test_minimo_respeita_cmv_dividido_por_noventa_por_cento_antes_de_arredondar(self):
+        for perfil in (None, taxas.normalizar({"plano": "entrega"})):
+            with self.subTest(perfil=perfil):
+                self.assertEqual(costing.preco_minimo_centavo(10, perfil=perfil), 11.12)
+                self.assertFalse(costing.avaliar_preco(11.11, 10, perfil=perfil)["viavel"])
+                self.assertTrue(costing.avaliar_preco(11.12, 10, perfil=perfil)["viavel"])
+                self.assertEqual(costing.preco_minimo_centavo(7 / 3, perfil=perfil), 2.60)
+                self.assertEqual(costing.cenarios_preco(7 / 3, perfil=perfil)["preco_minimo"], 2.60)
+                minimo = costing.cenarios_preco(20, perfil=perfil)
+                self.assertFalse(costing.avaliar_preco(minimo["preco_minimo"] - 0.01, 20, perfil=perfil)["viavel"])
+                self.assertGreater(costing.avaliar_preco(minimo["preco_minimo_com_sobra"], 20, perfil=perfil)["lucro"], 0)
+
+    def test_repasse_e_lucro_usam_formula_exata_antes_do_arredondamento(self):
+        aval = costing.avaliar_preco(11.15, 10)
+        self.assertEqual(aval["recebe_liquido"], 10.04)
+        self.assertEqual(aval["lucro"], 0.04)
+        self.assertIn("≈", aval["explicacao"])
+        self.assertIn("arredondados ao centavo", aval["explicacao"])
+
+    def test_cmv_fracionado_so_e_arredondado_para_exibir(self):
+        # Lote de 6,01 em duas porções: 3,005 por porção. O lucro é
+        # 0,90 × 5 − 3,005 = 1,495, exibido como 1,50.
+        cmv = 6.01 / 2
+        analise = costing.cenarios_preco(cmv)
+        aval = costing.avaliar_preco(5, cmv)
+        self.assertEqual((analise["cmv_por_porcao"], aval["cmv"]), (3.01, 3.01))
+        self.assertEqual(aval["lucro"], 1.50)
+        self.assertEqual(costing.brl(cmv), "R$ 3,01")
+        self.assertEqual(costing.brl(-cmv), "-R$ 3,01")
+        self.assertEqual(analise["preco_minimo"], 3.34)
+
+    def test_divisao_do_lote_nao_aumenta_o_minimo_por_ruido_binario(self):
+        for total, porcoes, cmv, minimo in ((4.32, 3, 1.44, 1.60), (5.94, 3, 1.98, 2.20), (5.94, 5, 1.188, 1.32)):
+            with self.subTest(total=total, porcoes=porcoes):
+                custo = costing.custo_por_porcao(total, porcoes)
+                self.assertEqual(custo, cmv)
+                self.assertEqual(costing.preco_minimo_centavo(custo), minimo)
+                self.assertTrue(costing.avaliar_preco(minimo, custo)["viavel"])
 
     def test_minimum_price_and_evaluation(self):
         self.assertAlmostEqual(costing.preco_minimo(9.0), 10.0)
@@ -38,6 +78,12 @@ class CostingTests(unittest.TestCase):
         self.assertEqual(equilibrado["preco_sugerido"], 20.0)
         self.assertEqual(out["cenarios"][0]["preco_sugerido"], 14.5)  # 9 / (0.9*0.7) = 14.29 -> 14.50
         self.assertIn("R$ 9,00", out["preco_minimo_explicacao"])
+
+    def test_cenarios_oferecem_duas_ou_tres_opcoes_de_margem(self):
+        self.assertEqual(len(costing.cenarios_preco(9, margens=[0.2, 0.4])["cenarios"]), 2)
+        for margens in ([0.2], [0.1, 0.2, 0.3, 0.4], [0.2, 1.0], [0.2, float("nan")]):
+            with self.subTest(margens=margens), self.assertRaises(ValueError):
+                costing.cenarios_preco(9, margens=margens)
 
     def test_brl_and_rounding(self):
         self.assertEqual(costing.brl(1234.5), "R$ 1.234,50")
@@ -125,8 +171,8 @@ class ToolsFlowTests(StoreTestCase):
         preco = call("preco_sugerir", cmv_por_porcao=cmv["cmv_por_porcao"], prato_id=cmv["prato_id"], precos_para_simular=[15, 25])
         self.assertEqual(len(preco["cenarios"]), 3)
         self.assertEqual(len(preco["simulacoes"]), 2)
-        self.assertEqual(preco["preco_minimo"], 7.75)
-        self.assertEqual((preco["taxa_comissao"], preco["taxa_pagamento"]), (0.12, 0.032))
+        self.assertEqual(preco["preco_minimo"], 7.30)
+        self.assertEqual((preco["taxa_comissao"], preco["taxa_pagamento"]), (0.10, 0.0))
 
         escolhido = preco["cenarios"][1]["preco_sugerido"]
         registro = call("cardapio_registrar", prato_id=cmv["prato_id"], preco_escolhido=escolhido)
@@ -146,7 +192,7 @@ class ToolsFlowTests(StoreTestCase):
         # A reserva aparece na despensa e já conta para o próximo prato.
         frango = call("despensa_buscar", ingredientes=["peito de frango"])["resultados"][0]["candidatos"][0]
         self.assertEqual((frango["estoque_legivel"], frango["disponivel_legivel"]), ("2 kg", "1 kg"))
-        segundo = call("receita_conferir_ingredientes", nome="Frango ao molho", porcoes=4,
+        segundo = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Frango ao molho", porcoes=4,
                        ingredientes=[{"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg"}])
         linha = segundo["ingredientes"][0]
         self.assertEqual((linha["tem_na_despensa"], linha["reservado_por_outros_pratos"], linha["falta"]), ("1 kg", "1 kg", "500 g"))
@@ -167,24 +213,26 @@ class ToolsFlowTests(StoreTestCase):
         self.assertEqual(call("cardapio_consultar")["cardapio"], [])
 
     def test_missing_quantities_and_unknown_content_become_pendencias(self):
-        out = call("receita_conferir_ingredientes", nome="Bolo", porcoes=8, ingredientes=[
+        out = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Bolo", porcoes=8, ingredientes=[
             {"nome": "cobertura de chocolate", "quantidade": 200, "unidade": "g"},
             {"nome": "farinha de trigo", "quantidade": 0, "unidade": "g"},
             {"nome": "leite condensado", "quantidade": 1, "unidade": "lata"},
         ])
         self.assertEqual(out["veredito"], "precisa_confirmar")
         self.assertEqual(len(out["pendencias"]), 3)
-        self.assertTrue(any("despensa_atualizar" in p for p in out["pendencias"]))
+        self.assertTrue(any("peso/volume" in p for p in out["pendencias"]))
+        self.assertTrue(any("despensa_atualizar" in p for p in out["proximos_passos"]))
+        self.assertFalse(any("despensa_atualizar" in p for p in out["pendencias"]))
         diz("O pote de cobertura de chocolate tem 1 kg.")
         call("despensa_atualizar", ingrediente="Cobertura de chocolate", conteudo_por_unidade={"quantidade": 1, "unidade": "kg"})
-        out2 = call("receita_conferir_ingredientes", nome="Bolo", porcoes=8, ingredientes=[
+        out2 = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Bolo", porcoes=8, ingredientes=[
             {"nome": "cobertura de chocolate", "quantidade": 200, "unidade": "g"},
         ])
         cob = out2["ingredientes"][0]
         self.assertEqual(cob["custo_uso_total"], 15.98)  # 0,2 un × R$ 79,90
 
     def test_confirmacao_da_receita_lanca_so_complementos_e_atualiza_saldo_da_api(self):
-        receita = call("receita_conferir_ingredientes", nome="Frango grelhado", porcoes=10, ingredientes=[
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Frango grelhado", porcoes=10, ingredientes=[
             {"nome": "Peito de frango", "quantidade": 1, "unidade": "kg"},
             {"nome": "Mix de pimentas", "quantidade": 50, "unidade": "g", "item_despensa": "",
              "quantidade_compra": 50, "unidade_compra": "g", "preco_compra_estimado": 0.50},
@@ -223,7 +271,7 @@ class ToolsFlowTests(StoreTestCase):
         self.assertEqual(call("despensa_registrar_compras", compras=itens)["orcamento"]["saldo"], 78.75)
 
     def test_insufficient_stock_is_flagged_and_priced(self):
-        out = call("receita_conferir_ingredientes", nome="Strogonoff", porcoes=6, ingredientes=[
+        out = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Strogonoff", porcoes=6, ingredientes=[
             {"nome": "alcatra", "quantidade": 1.2, "unidade": "kg"},
         ])
         item = out["ingredientes"][0]
@@ -255,20 +303,21 @@ class GateTests(StoreTestCase):
         self.assertEqual(out["bloqueios"][0]["tipo"], "sem_receita_conferida")
         self.assertEqual(call("cardapio_consultar")["pratos_em_analise"], [])
 
-    def test_cmv_blocked_while_profile_is_pending(self):
-        receita = call("receita_conferir_ingredientes", nome="Arroz", porcoes=4, ingredientes=[{"nome": "arroz", "quantidade": 500, "unidade": "g"}])
+    def test_cmv_blocked_while_available_time_is_pending(self):
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Arroz", porcoes=4, ingredientes=[{"nome": "arroz", "quantidade": 500, "unidade": "g"}])
         self.assertEqual(receita["veredito"], "precisa_confirmar")
         out = call("prato_calcular_cmv", receita_id=receita["receita_id"])
         self.assertFalse(out["success"])
         self.assertTrue(out["bloqueado"])
-        self.assertEqual({b["tipo"] for b in out["bloqueios"]}, {"perfil_pendente"})
-        self.assertEqual(len(out["bloqueios"]), 10)
-        self.assertTrue(any("clarify" in p for p in out["proximos_passos"]))
+        self.assertEqual({b["tipo"] for b in out["bloqueios"]}, {"tempo_disponivel_pendente"})
+        self.assertEqual(len(out["bloqueios"]), 1)
+        self.assertTrue(any("operacionais" in p for p in out["proximos_passos"]))
 
     def test_missing_oven_blocks_cmv(self):
         self._perfil_completo()
+        diz(FALA_COZINHA, "Agora não tenho forno.")
         call("perfil_cozinha_salvar", equipamentos={"forno": False})
-        receita = call("receita_conferir_ingredientes", nome="Carne moída gratinada", porcoes=6,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Carne moída gratinada", porcoes=6,
                        ingredientes=[{"nome": "carne moída", "quantidade": 500, "unidade": "g"}],
                        equipamentos_necessarios=["forno"], tecnicas_necessarias=["refogado"])
         self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
@@ -278,7 +327,7 @@ class GateTests(StoreTestCase):
 
     def test_over_budget_is_refused(self):
         self._perfil_completo()
-        receita = call("receita_conferir_ingredientes", nome="Salmão", porcoes=2, ingredientes=[
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Salmão", porcoes=2, ingredientes=[
             {"nome": "salmão", "quantidade": 1, "unidade": "kg", "item_despensa": "", "preco_compra_estimado": 95, "quantidade_compra": 1, "unidade_compra": "kg"}])
         self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
         out = call("prato_calcular_cmv", receita_id=receita["receita_id"])
@@ -292,8 +341,8 @@ class GateTests(StoreTestCase):
 
     def test_registration_refuses_when_numbers_changed(self):
         self._perfil_completo()
-        a = call("receita_conferir_ingredientes", nome="Prato A", porcoes=4, ingredientes=[{"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg"}])
-        b = call("receita_conferir_ingredientes", nome="Prato B", porcoes=4, ingredientes=[
+        a = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Prato A", porcoes=4, ingredientes=[{"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg"}])
+        b = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Prato B", porcoes=4, ingredientes=[
             {"nome": "peito de frango", "quantidade": 1.5, "unidade": "kg", "preco_compra_estimado": 16, "quantidade_compra": 1, "unidade_compra": "kg"}])
         cmv_a = call("prato_calcular_cmv", receita_id=a["receita_id"])
         cmv_b = call("prato_calcular_cmv", receita_id=b["receita_id"])

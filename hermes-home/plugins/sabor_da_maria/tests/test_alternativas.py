@@ -19,7 +19,7 @@ class AlternativasNoEstoqueTests(StoreTestCase):
         return self.store.salvar_receita(nome, "https://exemplo.test/receita", 2, {
             "ingredientes": ingredientes,
             "equipamentos_necessarios": ["fogão", "frigideira"],
-            "tecnicas_necessarias": ["grelhar"],
+            "tecnicas_necessarias": ["grelhar"], "tempo_preparo_min": 30,
             **dados,
         }, "conferida")
 

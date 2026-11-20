@@ -1,4 +1,4 @@
-import type { Conversation, Estado, Negocio, NovaCozinha, NovoItem, NovoPrato, NovoSalvo, PerfilPrecificacao, PratosDaCozinha, RespostaAnalytics, ToolResult } from "../types";
+import type { AcaoJornada, Conversation, Estado, Negocio, NovaCozinha, NovaVenda, NovoItem, NovoPrato, NovoSalvo, PeriodoVendas, PratosDaCozinha, RespostaAnalytics, RespostaVendas, ToolResult, VendaReal } from "../types";
 
 // Carrinho, pratos salvos, perfil do negócio, Minha cozinha, Analytics e o passo a passo da consultora moram no plugin; o nginx leva /api/ até o serviço `api`.
 
@@ -16,7 +16,7 @@ function erroDe(data: unknown, status: number): string {
     const erro = (data as { erro: unknown }).erro;
     if (typeof erro === "string" && erro) return erro;
   }
-  return `O carrinho respondeu ${status}.`;
+  return `Não consegui acessar os dados (erro ${status}).`;
 }
 
 async function chamar<T = Estado>(method: string, path: string, body?: unknown, opts: Pick<RequestInit, "signal" | "keepalive"> = {}): Promise<T> {
@@ -30,7 +30,7 @@ async function chamar<T = Estado>(method: string, path: string, body?: unknown, 
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new ApiError("Não consegui falar com o carrinho. Confere se o make run está rodando.", 0);
+    throw new ApiError("Não consegui acessar seus dados. Confira a conexão e tente de novo.", 0);
   }
   const data: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new ApiError(erroDe(data, response.status), response.status);
@@ -38,6 +38,7 @@ async function chamar<T = Estado>(method: string, path: string, body?: unknown, 
 }
 
 export const getEstado = () => chamar("GET", "/api/estado");
+export const escolherJornada = (acao: AcaoJornada) => chamar("POST", "/api/jornada", { acao });
 const historyTimeout = () => AbortSignal.timeout(8_000);
 export const getConversas = () => chamar<{ geracao_dados: string | null; conversas: Conversation[] }>("GET", "/api/conversas", undefined, { signal: historyTimeout() });
 export const gravarConversa = (conversa: Conversation, geracao_dados: string | null, keepalive = false) =>
@@ -63,7 +64,10 @@ export const saveCozinha = (cozinha: NovaCozinha) => chamar("PUT", "/api/cozinha
 /** Cada prato da base com o que precisa e o que a cozinha dela tem. */
 export const getPratosDaCozinha = () => chamar<PratosDaCozinha>("GET", "/api/cozinha/pratos");
 export const getAnalises = () => chamar<RespostaAnalytics>("GET", "/api/analytics/analises");
-export const saveTaxas = (perfil: PerfilPrecificacao) => chamar<RespostaAnalytics>("PUT", "/api/analytics/taxas", perfil);
+export const getVendas = (periodo: PeriodoVendas) => chamar<RespostaVendas>("GET", `/api/vendas?periodo=${periodo}`);
+export const registrarVenda = (venda: NovaVenda) => chamar<{ venda: VendaReal; ja_registrada: boolean; estado: Estado }>("POST", "/api/vendas", venda);
+export const estornarVenda = (id: number) => chamar<{ venda: VendaReal; ja_estornada: boolean; estado: Estado }>("POST", `/api/vendas/${id}/estorno`);
+export const restaurarVenda = (id: number) => chamar<{ venda: VendaReal; ja_restaurada: boolean; estado: Estado }>("POST", `/api/vendas/${id}/restaurar`);
 /** O que cada chamada de ferramenta da consultora fez (o plugin guarda uma frase por chamada, com o mesmo id do streaming). */
 export const getAtividade = (ids: string[]) =>
   chamar<{ atividade: Record<string, ToolResult> }>("GET", `/api/atividade?ids=${ids.map(encodeURIComponent).join(",")}`);

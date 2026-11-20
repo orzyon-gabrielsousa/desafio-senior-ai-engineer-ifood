@@ -186,7 +186,7 @@ class FerramentasDePratoTests(StoreTestCase):
         self.assertEqual(out["resumo"]["saldo"], 65.0)
         texto = out["diga_a_dona_maria"]
         for trecho in ("Coxinha de frango: R$ 18,00 (a comprar R$ 15,00)", "- frango desfiado (500 g): R$ 9,00",
-                       "- farinha de trigo (1 kg): R$ 3,00 — já tem na despensa", "saldo R$ 65,00"):
+                       "- farinha de trigo (1 kg): R$ 3,00 — já tem na despensa", "disponível para novas compras R$ 65,00"):
             self.assertIn(trecho, texto)
         self.assertEqual(out["carrinho"], [])  # o prato não aparece como ingrediente avulso
         self.assertEqual(out["pratos"][0]["prato"], "Coxinha de frango")

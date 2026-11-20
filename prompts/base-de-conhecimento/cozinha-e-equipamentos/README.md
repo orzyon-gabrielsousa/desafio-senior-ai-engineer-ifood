@@ -6,7 +6,7 @@ Esta pasta responde **"o que cada prato e cada ingrediente precisam da cozinha"*
 
 ## Como funciona
 
-1. A Dona Maria marca em **Minha cozinha** (menu, acima de Meu negócio) o que tem, o que sabe fazer e a rotina da cozinha, **ou conta para a consultora**, que pergunta na primeira conversa. Tudo vai para o SQLite embutido (tabela `perfil`, a mesma que a consultora lê) e aparece na tela.
+1. A consultora conduz as perguntas no chat e oferece escolhas clicáveis ou recebe respostas por texto. Ela pergunta equipamentos, habilidades e rotina relevantes ao preparo, usando o que já foi respondido. **Minha cozinha** também permite consultar e corrigir o cadastro. As respostas salvas vão para o SQLite embutido (tabela `perfil`, a mesma que a consultora lê). Não é necessário responder a todos os itens do catálogo para pesquisar ou criar um rascunho; os requisitos relevantes devem estar resolvidos antes do aceite do prato.
 2. Sempre que um prato aparece (Analytics, carrinho, conferência de receita), o plugin procura a ficha dele aqui e confere cada exigência contra o que está salvo.
 3. O resultado é um destes, por prato:
 

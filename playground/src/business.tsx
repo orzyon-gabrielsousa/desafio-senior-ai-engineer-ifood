@@ -6,7 +6,7 @@ import type { Acao, Estado, Negocio } from "./types";
 
 // Meu negócio: onde a loja fica, que tipo de negócio é e que tipo de alimentação ela faz. Os pratos ficam em Minha cozinha.
 // A consultora pergunta isso na primeira conversa e grava no mesmo registro: o que ela contou aparece aqui.
-const VAZIO: Negocio = { tipo: "", alimentacao: [], pais: "Brasil", estado: "", cidade: "", zona: "" };
+const VAZIO: Negocio = { tipo: "", alimentacao: [], pais: "Brasil", estado: "", cidade: "", zona: "", objetivo: "" };
 
 type BusinessSheetProps = {
   estado: Estado | null;
@@ -75,6 +75,11 @@ export function BusinessSheet({ estado, onClose, onSave }: BusinessSheetProps) {
               ))}
             </div>
           </fieldset>
+
+          <label className="field wide">
+            <span>Objetivo do negócio</span>
+            <input value={form.objetivo ?? ""} maxLength={240} placeholder="Ex.: começar a vender marmitas com lucro" onChange={(event) => mudar({ objetivo: event.target.value })} />
+          </label>
 
           <h3 className="sheet-label wide">Onde fica a loja</h3>
           <p className="sheet-note dica wide">

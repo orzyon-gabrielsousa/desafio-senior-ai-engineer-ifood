@@ -24,16 +24,23 @@ _ACEITE = re.compile(
     r"(?:pode|vamos|quero) (?:seguir|cozinhar|montar|preparar|fazer))\b"
 )
 _RECUSA = re.compile(
-    r"^nao\b|\b(?:desisti|nao (?:disse que )?(?:aceito|confirmo|aprovo|quero|pode seguir|vamos seguir))\b"
+    r"^nao\b|\b(?:desisti|nao (?:disse que )?(?:aceito|confirmo|aprovo|quero|pode seguir|vamos seguir|"
+    r"monte|prepare|cozinhe|faca|siga))\b"
 )
 _CONDICAO_OU_REVISAO = re.compile(
     r"\b(?:talvez|so se|desde que|contanto que|antes de aprovar|depois de revisar|"
     r"se (?:eu |voce )?(?:tiver|achar|for|ficar|encontrar|confirmar|conseguir|der|houver)|"
-    r"mas (?:troque|mude|substitua|ajuste|retire|reduza|aumente))\b"
+    # Uma ressalva nova precisa ser resolvida antes do aceite automático. Não
+    # basta a frase começar com "sim" e citar a ficha que já estava viável.
+    r"mas|porem|entretanto|todavia|so que|"
+    r"troque|mude|substitua|ajuste|retire|reduza|aumente|revise|"
+    r"nao (?:tenho|possuo|sei|consigo|posso)|acabou (?:o |a )?(?:gas|energia|luz))\b"
 )
 _CONFIRMACAO_DE_PERFIL = re.compile(r"^(?:sim )?(?:(?:eu )?confirmo(?: que)? )?(?:eu )?(?:tenho|possuo|uso|sei|domino)\b")
 _ACEITE_PARCIAL = re.compile(r"\b(?:so|somente|apenas) (?:a ficha|a lista|os ingredientes|as quantidades|os equipamentos)\b")
 _ACEITE_DE_PRECO = re.compile(r"^(?:sim )?(?:eu )?(?:aceito|aprovo|confirmo) (?:o preco|o valor|a sugestao de preco)\b")
+_ACEITE_DE_MEDIDA = re.compile(r"^(?:sim )?(?:eu )?(?:aceito|aprovo|confirmo) (?:a medida|as medidas|"
+                              r"\d+(?: \d+)? (?:g|kg|ml|l|gramas?|quilos?|mililitros?|litros?))\b")
 _PRATO_NUMERADO = re.compile(r"(?:\bprato\s+(?:escolhido\s+)?#?\s*|(?<!\w)#\s*)(\d+)\b", re.I)
 
 
@@ -62,7 +69,7 @@ def aceite_da_receita(prato_id: int | None, nome: str, falas: Iterable[Fala]) ->
     texto = _palavras(fala.texto)
     if (not _ACEITE.search(texto) or _RECUSA.search(texto) or _CONDICAO_OU_REVISAO.search(texto)
             or _CONFIRMACAO_DE_PERFIL.search(texto) or _ACEITE_PARCIAL.search(texto) or _ACEITE_DE_PRECO.search(texto)
-            or "?" in fala.texto):
+            or _ACEITE_DE_MEDIDA.search(texto) or "?" in fala.texto):
         return None
     ids = _ids_na_fala(fala.texto)
     if _menciona_prato(fala.texto, nome, prato_id):
@@ -90,7 +97,7 @@ def confirmou_prato(aceite: Any, nome: str, falas: Iterable[Fala], *, prato_id: 
 
 def custo_por_porcao(prato: dict[str, Any]) -> float:
     """Usa o CMV do lote para evitar arredondamento duplo nas contas por porção."""
-    return prato["cmv_total"] / prato["porcoes"]
+    return costing.custo_por_porcao(prato["cmv_total"], prato["porcoes"])
 
 
 def cenarios_da_consultora(args: dict) -> tuple[list[float], list[str], int, str]:
@@ -140,15 +147,25 @@ def porcoes_para_meta(cmv: float, preco: float, meta: float, *, perfil: dict[str
 
 def ficha_atual(store: Store, prato: dict[str, Any]) -> tuple[float, dict[str, Any]] | str:
     """Projeção de custo atual da própria ficha, sem mexer no preço escolhido ou nas reservas."""
-    from .tools import _resolver_ingredientes
+    from . import fonte
+    from .tools import _conferir_preparo_adaptado, _resolver_ingredientes
 
     receita = store.obter_receita(prato["receita_id"]) if prato.get("receita_id") else None
     ingredientes = prato["dados"].get("ingredientes") or ((receita["dados"].get("ingredientes") or []) if receita else [])
     porcoes = prato["porcoes"] or (receita["porcoes"] if receita else None)
     if not ingredientes or not porcoes or not math.isfinite(porcoes) or porcoes <= 0:
         return "Falta uma ficha com ingredientes, quantidades e rendimento."
+    if receita and receita["dados"].get("fonte_verificada"):
+        dados = receita["dados"]
+        original = dados["fonte_verificada"]
+        conferencia = fonte.conferir(original, ingredientes, porcoes, str(dados.get("adaptacao") or ""), dados.get("tempo_preparo_min"))
+        _conferir_preparo_adaptado(conferencia, dados.get("preparo_da_adaptacao"), original.get("modo_preparo"),
+                                  omitidos=dados.get("ingredientes_omitidos") or ())
+        if conferencia["bloqueios"]:
+            return conferencia["bloqueios"][0]["detalhe"]
     # As reservas da produção deste mesmo prato fazem parte do seu custo. Para os outros pratos, mantêm-se indisponíveis.
-    despensa = Store(store.db_path, store.xlsx_path, ignorar_prato_id=prato["id"]) if prato["status"] == "aceito" else store
+    despensa = (store if store.ignorar_prato_id == prato["id"]
+                else Store(store.db_path, store.xlsx_path, ignorar_prato_id=prato["id"]))
     try:
         resultado = _resolver_ingredientes(despensa, ingredientes)
     except ValueError as exc:
@@ -203,7 +220,7 @@ def consultar(store: Store) -> dict[str, Any]:
         porcoes, resultado = ficha
         salva = salvas.get(prato["id"])
         cmv_total = resultado["cmv_total"]
-        cmv = cmv_total / porcoes
+        cmv = costing.custo_por_porcao(cmv_total, porcoes)
         escolhido = prato["preco_venda"]
         status = "registrado" if prato["status"] == "aceito" else "proposta" if salva else "previa"
         item = {**comum, **cenarios_atuais(cmv, perfil, salva["dados"] if salva else {}),

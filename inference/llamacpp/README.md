@@ -8,8 +8,8 @@ Serviço `inference-llamacpp` do `docker-compose.yml` (perfil `llamacpp`, padrã
 | Modelo | `unsloth/Qwen3-8B-GGUF` → `Qwen3-8B-Q4_K_M.gguf` (5,0 GB) — `make model` |
 | Contexto | 65 536 tokens (o Hermes recusa modelos abaixo de 64k) |
 | KV cache | q8_0 (K) e q4_0 (V), flash attention ligada |
-| Modo | sem "thinking" (`--reasoning-budget 0`); troque para `-1` no `.env` se quiser raciocínio |
-| Teto de resposta | 4 096 tokens por geração (`LLAMA_N_PREDICT`, `-1` desliga): impede geração sem fim, que já derrubou o servidor com `CUDA error: the launch timed out` na GPU dividida com o desktop. Vale para quem não manda `max_tokens` (o Hermes não manda); um pedido com `max_tokens` maior ultrapassa o teto |
+| Modo | sem thinking: `--reasoning off`, `enable_thinking:false` no template e orçamento de raciocínio zero |
+| Saída por geração | Padrão de 1 536 tokens (`LLAMA_N_PREDICT`), com teto efetivo de 2 048 (`LLAMA_MAX_OUTPUT_TOKENS`) aplicado pelo proxy. Pedidos menores são preservados; `max_tokens`, `max_completion_tokens`, `max_output_tokens` e `n_predict` não ultrapassam esse teto |
 | Tool calling | nativo: `--jinja` usa o template do Qwen3 (formato Hermes `<tool_call>` → `tool_calls` OpenAI) |
 | Amostragem | temp 0,7 · top-p 0,8 · top-k 20 · min-p 0 (recomendação da Qwen para modo não-pensante) |
 
@@ -18,6 +18,14 @@ Serviço `inference-llamacpp` do `docker-compose.yml` (perfil `llamacpp`, padrã
 - **Qwen3-8B**: melhor relação qualidade/VRAM com tool calling confiável em português. Quantização Q4_K_M deixa ~11 GB em uso (pesos + KV de 64k), o que cabe nos 16 GB da RTX 5070 Ti dividindo a placa com o desktop. Com a GPU livre, `LLAMA_MODEL_FILE=Qwen3-8B-Q6_K.gguf` (`make model MODEL_FILE=Qwen3-8B-Q6_K.gguf`) melhora a qualidade.
 - **GGUF da unsloth**: traz o chat template corrigido para tool calls no llama.cpp.
 - **64k de contexto com KV quantizado**: o KV cache em f16 custaria ~9,7 GB sozinho. Quantizar K e V reduz esse uso para caber na GPU.
+
+## Limites de geração e trabalho em segundo plano
+
+O `--n-predict` nativo é um padrão que o cliente pode sobrescrever. O proxy restringe somente o orçamento de saída das rotas de geração; preserva mensagens, ferramentas, streaming e marcadores de parada. Limites conflitantes usam o menor valor, e corpos ou tipos inválidos são recusados com HTTP 400. Uma resposta que chega ao teto pode terminar com `finish_reason: length`; a validação ponta a ponta deve conferir que a ficha e as chamadas de ferramenta continuam completas.
+
+Os limites ativos aparecem em `/kv-cache` no campo `generation_limits`. Para aumentar o orçamento, ajuste `LLAMA_MAX_OUTPUT_TOKENS` e, se necessário, `LLAMA_N_PREDICT` e recrie o serviço. O modo de raciocínio é explícito; para experimentar thinking, ajuste em conjunto `LLAMA_REASONING_MODE`, `LLAMA_ENABLE_THINKING` e `LLAMA_REASONING_BUDGET`, mantendo o teto total de saída.
+
+No Hermes, `auxiliary.background_review.enabled: false` desativa somente os forks automáticos de revisão de memória/skills. Eles compartilham a mesma GPU e podem gerar milhares de tokens depois de uma conversa. O histórico no SQLite, a memória explícita, a indexação de embeddings e a recuperação de conversas permanecem ativos. `/refine` continua disponível manualmente. A opção é nativa da versão instalada, sem alterações no núcleo do Hermes.
 
 ## Cache KV no SSD
 

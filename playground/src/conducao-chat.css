@@ -1,0 +1,18 @@
+.conducao-estoque-lista { list-style: none; margin: 14px 0; padding: 0; }
+.conducao-estoque-lista li { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line, #eee); }
+.conducao-estoque-lista li > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.conducao-estoque-lista li > div > span { color: var(--muted, #666); font-size: .88em; }
+.conducao-estoque-lista li > span { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.conducao-estoque-completo { margin-bottom: 18px; }
+.conducao-estoque-completo summary { color: var(--red, #ea1d2c); cursor: pointer; padding: 5px 0; }
+.conducao-chat button:disabled { opacity: .55; cursor: wait; }
+.conducao-medida { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 12px; }
+.conducao-pergunta-texto { white-space: pre-line; }
+.conducao-medida .field { flex: 0 1 9rem; }
+.conducao-medida .conducao-dica { flex-basis: 100%; }
+.conducao-medida button:disabled { cursor: default; }
+/* Os botões das sugestões são frases com o nome do prato: em tela estreita quebram em duas linhas e ficam alinhados como texto. */
+.conducao-sugestoes .chip { border-radius: 18px; text-align: left; }
+@media (max-width: 500px) {
+  .conducao-estoque-lista li { flex-direction: column; gap: 5px; }
+}

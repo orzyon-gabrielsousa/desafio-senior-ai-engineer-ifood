@@ -18,7 +18,12 @@ Rotas (JSON; erros voltam como ``{"erro": "..."}``):
     GET    /api/analytics?escopo=&limite=&categoria=    pratos mais vendidos, priorizados pelo lugar da loja, cada um com
                                              o que a cozinha dela faz e quanto cobrar para lucrar depois da taxa
     GET    /api/analytics/analises          {analises: [...]} propostas salvas pela consultora após o aceite da receita final,
-    PUT    /api/analytics/taxas             plano iFood, pagamento e alíquota efetiva sobre a venda
+    GET    /api/vendas/resumo               vendas realizadas: hoje, semana de segunda a domingo e mês, no fuso de São Paulo
+    GET    /api/vendas?periodo=dia|semana|mes    histórico de vendas e totais do período (lista limitada, totais completos)
+    POST   /api/vendas                      {prato_id,quantidade,preco_unitario?,vendido_em?:ISO com fuso,operacao:UUID}
+    POST   /api/vendas/<id>/estorno          cancela a contagem sem apagar a venda nem alterar estoque/orçamento
+    POST   /api/vendas/<id>/restaurar        reverte o estorno
+    PUT    /api/analytics/taxas             compatibilidade: devolve regra fixa de 10% do enunciado
                                              com cenários, recomendação e, quando registrado, o preço escolhido
     GET    /api/precos?cmv=&preco=           quanto cobrar para um custo (CMV) dado, e o que sobra no preço do mercado
     POST   /api/carrinho/itens               {nome, preco_total, quantidade?, unidade?}   ingrediente avulso
@@ -51,9 +56,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import analytics, costing, historico, precificacao
+from . import analytics, costing, historico, precificacao, vendas
 from . import cozinha as cozinha_mod
 from . import negocio as negocio_mod
+from . import jornada
 from .store import OrcamentoEstourado, Store
 from .tools import _pendencias_perfil
 
@@ -70,14 +76,20 @@ def estado(store: Optional[Store] = None) -> dict[str, Any]:
     pendencias_cozinha = _pendencias_perfil(perfil)
     orcamento = store.orcamento()
     carrinho = store.carrinho_itens()
+    analises_salvas = {analise["prato_id"] for analise in store.analises_preco()}
+    pratos_atuais = jornada.pratos_atuais(store)
     return {
         "geracao_dados": historico.geracao(store.db_path),
+        "jornada": jornada.resumo(store, pratos=pratos_atuais),
+        "vendas_resumo": vendas.resumo(store),
         "orcamento": store.carrinho_resumo(orcamento=orcamento),
         "perfil_precificacao": store.perfil_precificacao(),
         "compras_pagas": [{"ingrediente": compra["ingrediente"], "quantidade": compra["quantidade"],
                            "unidade": compra["unidade"], "preco_total": compra["preco_estimado"]}
                           for compra in orcamento["compras_confirmadas"] if compra["prato_id"] is None],
-        "pratos_escolhidos": store.pratos_em_andamento(),
+        "historico_compras": store.historico_compras(),
+        "pratos_escolhidos": [{**prato, "analise_preco_salva": prato["id"] in analises_salvas}
+                              for prato in pratos_atuais],
         "despensa_consultada": store.despensa_consultada(),
         "carrinho": carrinho,
         "alertas": cozinha_mod.alertas_do_carrinho(carrinho, perfil),
@@ -173,6 +185,22 @@ def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str,
             return 200, {"conversas_salvas": banco.total(), **memoria.estatisticas()}
         if rota == ["estado"] and metodo == "GET":
             return 200, estado(store)
+        if rota == ["jornada"] and metodo == "POST":
+            jornada.responder(store, _objeto(corpo).get("acao"))
+            return 200, estado(store)
+        if rota == ["vendas", "resumo"] and metodo == "GET":
+            return 200, vendas.resumo(store)
+        if rota == ["vendas"]:
+            if metodo == "GET":
+                return 200, vendas.consultar(store, consulta.get("periodo", ["dia"])[0])
+            if metodo == "POST":
+                resultado = vendas.registrar(store, _objeto(corpo))
+                return 200 if resultado["ja_registrada"] else 201, {**resultado, "estado": estado(store)}
+        if len(rota) == 3 and rota[0] == "vendas" and metodo == "POST":
+            if rota[2] == "estorno":
+                return 200, {**vendas.estornar(store, _id(rota[1])), "estado": estado(store)}
+            if rota[2] == "restaurar":
+                return 200, {**vendas.restaurar(store, _id(rota[1])), "estado": estado(store)}
         if rota == ["despensa", "conferir"] and metodo == "POST":
             itens = [{"nome": item["nome"], "disponivel": item["disponivel_legivel"], "preco_pago": item["preco_total"]}
                      for item in store.ingredientes()]
@@ -244,11 +272,13 @@ def tratar(metodo: str, caminho: str, corpo: Any = None) -> tuple[int, dict[str,
             if ids:
                 return 200, {"atividade": store.atividade_das_chamadas(ids)}
             return 200, {"recentes": store.atividade_recente(int(_numero(consulta.get("limite", ["30"])[0], "limite")))}
-        if rota and rota[0] in {"saude", "estado", "despensa", "analytics", "precos", "carrinho", "salvos", "negocio", "cozinha", "atividade", "memoria"}:
+        if rota and rota[0] in {"saude", "estado", "jornada", "vendas", "despensa", "analytics", "precos", "carrinho", "salvos", "negocio", "cozinha", "atividade", "memoria"}:
             return 405, {"erro": "método não permitido"}
         return 404, {"erro": "rota desconhecida"}
     except OrcamentoEstourado as exc:
         return 409, {"erro": str(exc), "falta": exc.falta, "estado": estado()}
+    except vendas.ConflitoOperacao as exc:
+        return 409, {"erro": str(exc)}
     except ValueError as exc:
         return 400, {"erro": str(exc)}
     except KeyError as exc:

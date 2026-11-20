@@ -1,6 +1,10 @@
+import json
 import unittest
+from copy import deepcopy
 
-from sabor_da_maria.matching import best_matches, score
+from sabor_da_maria import cozinha, montagem, painel, tools
+from sabor_da_maria.matching import best_matches, preparo_caseiro_entre, score
+from sabor_da_maria.units import materia_prima_do_preparo
 from sabor_da_maria.store import OrcamentoEstourado, Store
 
 from ._base import StoreTestCase
@@ -46,6 +50,12 @@ class MatchingTests(unittest.TestCase):
     def test_score_bounds(self):
         self.assertEqual(score("Cebola", "Cebola"), 1.0)
         self.assertEqual(score("", "Cebola"), 0.0)
+
+    def test_fresco_nao_vira_produto_pronto(self):
+        self.assertEqual(best_matches("molho de tomate", ["Tomate"]), [])
+        self.assertEqual(best_matches("batata palha", ["Batata"]), [])
+        self.assertEqual(best_matches("molho de tomate", ["Tomate", "Molho de tomate pronto"])[0]["nome"],
+                         "Molho de tomate pronto")
 
 
 class StoreTests(StoreTestCase):
@@ -232,6 +242,126 @@ class StoreTests(StoreTestCase):
         resumo = store.carrinho_resumo()
         self.assertEqual((resumo["gasto_confirmado"], resumo["reservado_cardapio"], resumo["saldo"]), (1.25, 0, 74.75))
 
+    def _prato_calculado(self, store, nome):
+        prato, = store.selecionar_pratos([{"nome": nome}])
+        receita = store.salvar_receita(nome, None, 2, {}, "conferida", prato_id=prato["id"])
+        store.salvar_prato(nome, receita, 2, 10, 5, {}, prato_id=prato["id"])
+        return prato["id"], receita
+
+    def test_aceite_separa_carrinho_e_estoque_antes_do_preco_sem_debitar_ao_publicar(self):
+        store = Store()
+        peito = store.obter("Peito de frango")
+        prato_id, receita_id = self._prato_calculado(store, "Frango cremoso")
+        compras = [{"ingrediente": "Creme de leite", "quantidade": 200, "unidade": "g", "preco_estimado": 4}]
+        da_despensa = [{"ingrediente": "Peito de frango", "quantidade": 500, "unidade": "g", "valor": 7}]
+        reservas = [{"ingrediente_id": peito["id"], "quantidade_base": .5}]
+        store.carrinho_montar_da_receita(receita_id, "Frango cremoso", compras)  # lista manual já existente
+
+        def aceitar():
+            store.salvar_analise_preco(prato_id, {"cenarios": []}, receita_id_esperada=receita_id, compras=compras,
+                                      da_despensa=da_despensa, reservas=reservas)
+
+        aceitar()
+        itens = store.carrinho_itens()
+        self.assertEqual([(i["nome"], i["ja_tem"]) for i in itens], [("Peito de frango", True), ("Creme de leite", False)])
+        self.assertEqual(store.obter_prato(prato_id)["status"], "cmv_calculado")
+        self.assertEqual(store.obter("Peito de frango")["disponivel_base"], 1.5)
+        self.assertEqual(store.carrinho_resumo()["saldo"], 76)
+        self.assertEqual(store.orcamento()["compras_confirmadas"], [])
+        avaliador = Store(ignorar_prato_id=prato_id)
+        self.assertEqual(avaliador.carrinho_resumo()["saldo"], 80)
+        self.assertEqual(avaliador.obter("Peito de frango")["disponivel_base"], 2)
+
+        avulso = store.carrinho_adicionar("Outro item", 3)
+        aceitar()
+        self.assertEqual(store.carrinho_itens(), [*itens, avulso])
+        for baixados in (2, 0):
+            publicado = store.aceitar_prato(prato_id, 14, compras, reservas, receita_id_esperada=receita_id)
+            self.assertEqual(publicado["linhas_do_carrinho_que_viraram_compras"], baixados)
+            resumo = store.carrinho_resumo()
+            self.assertEqual((resumo["saldo"], resumo["reservado_cardapio"], resumo["gasto_confirmado"]), (73, 4, 0))
+            self.assertEqual(store.carrinho_itens(), [avulso])
+            self.assertEqual(store.obter("Peito de frango")["disponivel_base"], 1.5)
+
+    def test_compromisso_sem_saldo_ou_estoque_reverte_gravacao_e_revisao_libera(self):
+        store = Store()
+        peito = store.obter("Peito de frango")
+        prato_id, receita_id = self._prato_calculado(store, "Frango com cebola")
+        outro_id, outra_receita = self._prato_calculado(store, "Frango com alho")
+        reservas = [{"ingrediente_id": peito["id"], "quantidade_base": 1.5}]
+        compras = [{"ingrediente": "Orégano", "quantidade": 30, "unidade": "g", "preco_estimado": 10}]
+        avulso = store.carrinho_adicionar("Pacote avulso", 75)
+
+        with self.assertRaises(OrcamentoEstourado):
+            store.salvar_analise_preco(prato_id, {"cenarios": []}, receita_id_esperada=receita_id, compras=compras, reservas=reservas)
+        self.assertEqual(store.analises_preco(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+        self.assertEqual(store.carrinho_itens(), [avulso])
+        store.carrinho_remover(avulso["id"])
+
+        store.salvar_analise_preco(prato_id, {"cenarios": []}, receita_id_esperada=receita_id, compras=compras, reservas=reservas)
+        with self.assertRaisesRegex(ValueError, "estoque disponível"):
+            store.salvar_analise_preco(outro_id, {"cenarios": []}, receita_id_esperada=outra_receita, compras=compras, reservas=reservas)
+        self.assertEqual([a["prato_id"] for a in store.analises_preco()], [prato_id])
+        self.assertEqual(store.carrinho_resumo()["saldo"], 70)
+
+        store.salvar_receita("Frango com cebola", None, 2, {}, "conferida", prato_id=prato_id)
+        self.assertEqual(store.analises_preco(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+        self.assertEqual(store.carrinho_itens(), [])
+        self.assertEqual(store.carrinho_resumo()["saldo"], 80)
+        store.salvar_analise_preco(outro_id, {"cenarios": []}, receita_id_esperada=outra_receita, compras=compras, reservas=reservas)
+        store.selecionar_pratos([{"nome": "Nova alternativa"}], substituir_prato_id=outro_id)
+        self.assertEqual(store.analises_preco(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+        self.assertEqual(store.carrinho_itens(), [])
+        self.assertEqual(store.carrinho_resumo()["saldo"], 80)
+
+    def test_liberar_compromisso_inviavel_preserva_a_ficha_e_a_previa_sem_compromisso(self):
+        store = Store()
+        peito = store.obter("Peito de frango")
+        prato_id, receita_id = self._prato_calculado(store, "Frango com orégano")
+        self.assertFalse(store.liberar_compromisso_inviavel(prato_id, receita_id))
+        self.assertEqual(store.obter_prato(prato_id)["status"], "cmv_calculado")
+
+        store.salvar_analise_preco(
+            prato_id, {"cenarios": []}, receita_id_esperada=receita_id,
+            compras=[{"ingrediente": "Orégano", "quantidade": 15, "unidade": "g", "preco_estimado": 5}],
+            reservas=[{"ingrediente_id": peito["id"], "quantidade_base": 1}],
+        )
+        self.assertFalse(store.liberar_compromisso_inviavel(prato_id, receita_id + 1))
+        self.assertEqual(store.carrinho_resumo()["saldo"], 75)
+        self.assertTrue(store.liberar_compromisso_inviavel(prato_id, receita_id))
+        self.assertFalse(store.liberar_compromisso_inviavel(prato_id, receita_id))
+        prato = store.obter_prato(prato_id)
+        self.assertEqual((prato["receita_id"], prato["status"], prato["cmv_total"]), (receita_id, "selecionado", None))
+        self.assertEqual(store.analises_preco(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+        self.assertEqual(store.carrinho_resumo()["saldo"], 80)
+
+    def test_remover_grupo_automatico_libera_lote_e_desfaz_intencao_persistida(self):
+        store = Store()
+        peito = store.obter("Peito de frango")
+        nome, fonte = "Frango ao forno", "https://exemplo.test/frango-ao-forno"
+        prato, = store.selecionar_pratos([{"nome": nome, "fonte_url": fonte, "usar_quando_viavel": True}])
+        prato_id = prato["id"]
+        receita_id = store.salvar_receita(nome, fonte, 2, {}, "conferida", prato_id=prato_id)
+        store.salvar_prato(nome, receita_id, 2, 10, 5, {}, prato_id=prato_id)
+        store.salvar_analise_preco(
+            prato_id, {"cenarios": []}, receita_id_esperada=receita_id,
+            da_despensa=[{"ingrediente": peito["nome"], "quantidade": 500, "unidade": "g", "valor": 7}],
+            reservas=[{"ingrediente_id": peito["id"], "quantidade_base": .5}],
+        )
+        avulso = store.carrinho_adicionar("Alcaparras", 2)
+        self.assertTrue(store.obter_prato(prato_id)["dados"]["selecao"]["usar_quando_viavel"])
+        self.assertEqual(len(store.carrinho_remover_prato(nome)), 1)
+        reaberto = store.obter_prato(prato_id)
+        self.assertEqual((reaberto["receita_id"], reaberto["status"]), (receita_id, "selecionado"))
+        self.assertEqual(reaberto["dados"]["selecao"], {"fonte_url": fonte})
+        self.assertEqual(store.analises_preco(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+        self.assertEqual(store.carrinho_itens(), [avulso])
+
     def test_substitui_rascunho_atomicamente_e_preserva_carrinho_e_orcamento(self):
         store = Store()
         original, = store.selecionar_pratos([{"nome": "Frango com arroz e feijão"}])
@@ -276,6 +406,227 @@ class StoreTests(StoreTestCase):
         self.assertEqual(perfil["observacoes"], ["cozinha pequena"])
         orc = store.orcamento()
         self.assertEqual((orc["inicial"], orc["comprometido"], orc["restante"]), (80.0, 0.0, 80.0))
+
+
+class PreparosCaseirosTests(StoreTestCase):
+    def setUp(self):
+        super().setUp()
+        self.store = Store()
+        self.molho = {"nome": "molho de tomate quanto baste", "quantidade": 150, "unidade": "g"}
+
+    def resolver(self, *ingredientes):
+        return tools._resolver_ingredientes(self.store, list(ingredientes) or [self.molho])
+
+    def perfil_completo(self):
+        self.store.perfil_salvar({
+            "equipamentos": {i.id: 4 if i.id == "fogao" else True for i in cozinha.CATALOGO if i.grupo != cozinha.HABILIDADE},
+            "tecnicas": {i.id: "sim" for i in cozinha.CATALOGO if i.grupo == cozinha.HABILIDADE},
+            "restricoes": {"espaco_geladeira": "bastante", "tempo_por_cozinhada_min": 120,
+                           "gas": "botijão", "energia": "estável"},
+        })
+
+    def ficha(self, nome="Pizza de frango", usar=False):
+        fonte = {"nome": nome, "url": "https://exemplo.test/pizza", "porcoes": 4,
+                 "tempo_preparo_min": 30, "ingredientes": ["150 g de molho de tomate quanto baste"],
+                 "modo_preparo": "Coloque o molho na panela e aqueça no fogão."}
+        prato, = self.store.selecionar_pratos([{"nome": nome, "fonte_url": fonte["url"], "usar_quando_viavel": usar}])
+        rid = self.store.salvar_receita(nome, fonte["url"], 4, {
+            "fonte_verificada": fonte, "modo_preparo": fonte["modo_preparo"], "ingredientes": [dict(self.molho)],
+            "tempo_preparo_min": 30, "sessao_da_conferencia": "derivados",
+        }, "conferida", prato_id=prato["id"])
+        return self.store.obter_prato(prato["id"]), self.store.obter_receita(rid)
+
+    def test_molho_usa_tomate_sem_compra_e_sem_mutacao(self):
+        antes = self.store.obter("Tomate")
+        res = self.resolver()
+        self.assertEqual(res["pendencias"], [])
+        self.assertEqual(res["compras"], [])
+        linha, = res["itens"]
+        self.assertEqual(linha["item_despensa"], "Tomate")
+        self.assertAlmostEqual(linha["usa_da_despensa_base"], .1875)
+        self.assertEqual(linha["custo_uso_total"], round(.1875 * antes["custo_unitario_base"], 2))
+        self.assertIn("rendimento local estimado", linha["conversao"])
+        self.assertEqual(self.store.obter("Tomate"), antes)
+        self.assertIsNone(self.store.obter("molho de tomate"))
+        self.assertEqual(self.store.reservas_ativas(), [])
+        self.assertEqual(self.store.orcamento()["saldo"], 80)
+
+    def test_outros_derivados_aplicam_rendimento(self):
+        for nome, materia, pronto, cru in (("purê de batatas", "Batata", 170, .2),
+                                          ("arroz branco cozido", "Arroz branco tipo 1", 500, .2),
+                                          ("feijão carioca cozido", "Feijão carioquinha", 400, .2),
+                                          ("feijão preto cozido", "Feijão preto", 400, .2),
+                                          ("peito de frango cozido e desfiado", "Peito de frango", 150, .2)):
+            with self.subTest(nome=nome):
+                res = self.resolver({"nome": nome, "quantidade": pronto, "unidade": "g"})
+                self.assertEqual(res["pendencias"], [])
+                self.assertEqual(res["itens"][0]["item_despensa"], materia)
+                self.assertAlmostEqual(res["itens"][0]["usa_da_despensa_base"], cru)
+
+    def test_plurais_caseiro_e_direcao(self):
+        for nome in ("molho caseiro de tomates", "passata de tomate caseira", "purê de tomates a gosto"):
+            self.assertIsNotNone(preparo_caseiro_entre(nome, "Tomate"))
+        for nome, candidato in (("Tomate", "molho de tomate"), ("extrato de tomate", "Tomate"),
+                                ("molho de tomate", "Tomate seco"), ("leite condensado", "Leite integral"),
+                                ("frango desfiado", "Coxa de frango"), ("arroz cozido", "Arroz cozido")):
+            self.assertIsNone(preparo_caseiro_entre(nome, candidato))
+
+    def test_volume_usa_densidade_do_pronto(self):
+        res = self.resolver({**self.molho, "quantidade": 1, "unidade": "xícara"})
+        self.assertAlmostEqual(res["itens"][0]["usa_da_despensa_base"], .3)
+        conv = materia_prima_do_preparo(1, "xícara", "feijão preto cozido", "Feijão preto", "kg", 2)
+        self.assertAlmostEqual(conv.qty_base, .09)
+
+    def test_unidade_de_embalagem_nao_vira_um_tomate(self):
+        res = self.resolver({**self.molho, "quantidade": 1, "unidade": "un"})
+        self.assertIn("peso/volume", res["pendencias"][0])
+        self.assertNotIn("item_id", res["itens"][0])
+        for rendimento in (0, -1, float("nan"), float("inf")):
+            self.assertIsNone(materia_prima_do_preparo(150, "g", "molho de tomate", "Tomate", "kg", rendimento).qty_base)
+
+    def test_produto_pronto_disponivel_tem_preferencia(self):
+        self.store.registrar_compra("Molho de tomate pronto", 1, "kg", 12, novo=True)
+        res = self.resolver()
+        self.assertEqual(res["preparos_caseiros"], [])
+        self.assertEqual(res["itens"][0]["item_despensa"], "Molho de tomate pronto")
+        self.assertAlmostEqual(res["itens"][0]["usa_da_despensa_base"], .15)
+
+    def test_vinculo_explicito_a_materia_prima_e_aceito(self):
+        res = self.resolver({**self.molho, "item_despensa": "Tomate"})
+        self.assertEqual(res["pendencias"], [])
+        res = self.resolver({**self.molho, "item_despensa": "Batata"})
+        self.assertTrue(res["pendencias"])
+
+    def test_compra_explicita_de_pronto_e_preservada(self):
+        cotacao = {"preco_compra_estimado": 10, "quantidade_compra": 1, "unidade_compra": "kg"}
+        res = self.resolver({**self.molho, "item_despensa": None, **cotacao})
+        self.assertEqual(res["preparos_caseiros"], [])
+        self.assertEqual(res["compras_total_estimado"], 10)
+        self.assertEqual(res["cmv_total"], 1.5)
+
+    def test_estoque_compartilhado_no_lote_nao_e_contado_duas_vezes(self):
+        estoque = self.store.obter("Tomate")["estoque_base"]
+        direto = {"nome": "Tomate", "quantidade": estoque - .1, "unidade": "kg"}
+        for ingredientes in ((direto, self.molho), (self.molho, direto)):
+            res = self.resolver(*ingredientes)
+            self.assertEqual(res["pendencias"], [])
+            self.assertAlmostEqual(sum(i["usa_da_despensa_base"] for i in res["itens"]), estoque)
+            self.assertEqual(res["compras"][0]["ingrediente"], "Tomate")
+            self.assertAlmostEqual(res["compras"][0]["quantidade"], .0875)
+        repetido = self.resolver(self.molho, dict(self.molho))
+        self.assertEqual(len(repetido["itens"]), 1)
+        self.assertTrue(repetido["pendencias"])
+
+    def test_compra_de_tomate_nao_usa_cotacao_do_molho(self):
+        estoque = self.store.obter("Tomate")["estoque_base"]
+        res = self.resolver({**self.molho, "quantidade": (estoque + .2) * .8, "unidade": "kg",
+                             "preco_compra_estimado": 100, "quantidade_compra": 1, "unidade_compra": "kg"})
+        self.assertAlmostEqual(res["compras"][0]["quantidade"], .2)
+        self.assertEqual(res["compras"][0]["ingrediente"], "Tomate")
+        self.assertLess(res["compras"][0]["preco_estimado"], 100)
+
+    def test_duas_faltas_da_mesma_materia_prima_sao_somadas(self):
+        estoque = self.store.obter("Tomate")["estoque_base"]
+        res = self.resolver({"nome": "Tomate", "quantidade": estoque + .1, "unidade": "kg"}, self.molho)
+        self.assertEqual(len(res["compras"]), 1)
+        self.assertAlmostEqual(res["compras"][0]["quantidade"], .2875)
+        self.assertEqual(sum(c["preco_estimado"] for c in res["compras"]), res["compras_total_estimado"])
+
+    def test_agua_simples_e_utilidade_mas_nao_agua_mineral(self):
+        for nome in ("água", "água morna", "água potável filtrada"):
+            res = self.resolver({"nome": nome, "quantidade": 100, "unidade": "ml"})
+            self.assertEqual(res["pendencias"], [])
+            self.assertEqual(res["cmv_total"], 0)
+            self.assertEqual(res["compras"], [])
+        self.assertTrue(self.resolver({"nome": "água mineral", "quantidade": 100, "unidade": "ml"})["pendencias"])
+
+    def test_fonte_preservada_tempo_extra_e_reconferencia_idempotente(self):
+        self.perfil_completo()
+        prato, receita = self.ficha()
+        antes = deepcopy(receita)
+        for _ in range(2):
+            aval = tools._avaliar_prato(self.store, receita["dados"]["ingredientes"], receita)
+            self.assertEqual(aval["bloqueios"], [])
+            self.assertEqual(aval["requisitos"]["tempo_preparo_min"], 50)
+            self.assertEqual(aval["requisitos"]["tempo_receita_min"], 30)
+        self.assertEqual(receita, antes)
+        self.assertEqual(self.store.obter_receita(receita["id"]), antes)
+        self.assertEqual(self.store.obter_prato(prato["id"])["status"], "selecionado")
+
+    def test_molho_simples_nao_exige_panela_especial(self):
+        self.perfil_completo()
+        _, receita = self.ficha()
+        self.store.perfil_salvar({"equipamentos": {"panela_grande": False}})
+        aval = tools._avaliar_prato(self.store, receita["dados"]["ingredientes"], receita)
+        self.assertEqual(aval["bloqueios"], [])
+        self.assertNotIn("panela grande", aval["requisitos"]["equipamentos_necessarios"])
+
+    def test_tool_reconfere_sem_acumular_tempo_e_sem_compromissos(self):
+        self.perfil_completo()
+        prato, receita = self.ficha()
+        original = deepcopy(receita["dados"]["fonte_verificada"])
+        for _ in range(2):
+            saida = json.loads(tools.receita_conferir_ingredientes({"prato_id": prato["id"],
+                                "ingredientes": [dict(self.molho)], "porcoes": 4}, session_id="derivados"))
+            self.assertTrue(saida["success"], saida)
+            self.assertEqual(saida["veredito"], "viavel")
+            self.assertEqual(saida["tempo_preparo_min"], 50)
+            self.assertEqual(saida["tempo_receita_min"], 30)
+            self.assertIn("Preparos caseiros locais", saida["diga_a_dona_maria"])
+            salva = self.store.obter_receita(saida["receita_id"])
+            self.assertEqual(salva["dados"]["fonte_verificada"], original)
+            self.assertEqual(salva["dados"]["tempo_preparo_min"], 30)
+            self.assertEqual(self.store.reservas_ativas(), [])
+            self.assertEqual(self.store.carrinho_itens(), [])
+            self.assertEqual(self.store.orcamento()["saldo"], 80)
+
+    def test_gas_tempo_e_equipamento_continuam_conferidos(self):
+        self.perfil_completo()
+        _, receita = self.ficha()
+        self.store.perfil_salvar({"restricoes": {"tempo_por_cozinhada_min": 40, "gas": "sem gás"},
+                                 "equipamentos": {"fogao": 0, "fogão a gás": 0}})
+        aval = tools._avaliar_prato(self.store, receita["dados"]["ingredientes"], receita)
+        tipos = {b["tipo"] for b in aval["bloqueios"]}
+        self.assertIn("tempo_insuficiente", tipos)
+        self.assertIn("gas_indisponivel", tipos)
+        self.assertIn("equipamento_faltando", tipos)
+        self.assertEqual(self.store.reservas_ativas(), [])
+
+    def test_retomada_apresenta_preparo_antes_do_aceite(self):
+        self.perfil_completo()
+        prato, receita = self.ficha()
+        montagem.iniciar_turno("derivados", "retomada")
+        painel._pergunta_da_retomada(self.store, prato, receita, "derivados")
+        texto = montagem.resposta_preparada("derivados", "retomada")
+        self.assertIn("Preparos caseiros locais", texto)
+        self.assertIn("Tomate", texto)
+        self.assertIn("aceita preparar", texto)
+        self.assertEqual(self.store.reservas_ativas(), [])
+
+    def test_selecao_antiga_nao_aceita_derivado_automaticamente(self):
+        self.perfil_completo()
+        prato, receita = self.ficha(usar=True)
+        self.assertIsNone(tools._concluir_escolha_viavel(self.store, "derivados", prato["id"]))
+        self.assertEqual(self.store.obter_prato(prato["id"])["status"], "selecionado")
+        self.assertEqual(self.store.analises_preco(), [])
+
+    def test_reserva_usa_materia_prima_entre_pratos_sem_novo_debito(self):
+        res = self.resolver()
+        prato, receita = self.ficha()
+        self.store.salvar_prato(prato["nome"], receita["id"], 4, res["cmv_total"], res["cmv_total"] / 4,
+                                {"resultado": res}, prato_id=prato["id"])
+        reservas = tools._reservas_de(res)
+        carrinho = tools._itens_da_despensa_para_carrinho(res)
+        self.assertEqual(carrinho[0]["ingrediente"], "Tomate")
+        for _ in range(2):
+            self.store.salvar_analise_preco(prato["id"], {"cenarios": []}, receita_id_esperada=receita["id"],
+                                          da_despensa=carrinho, reservas=reservas, compras=[])
+        item = self.store.obter("Tomate")
+        self.assertAlmostEqual(item["reservado_base"], .1875)
+        segundo = self.resolver({**self.molho, "quantidade": item["estoque_base"] * .8, "unidade": "kg"})
+        self.assertAlmostEqual(segundo["compras"][0]["quantidade"], .1875)
+        self.assertEqual(self.store.orcamento()["saldo"], 80)
+        self.assertEqual(self.store.orcamento()["compras_confirmadas"], [])
 
 
 if __name__ == "__main__":

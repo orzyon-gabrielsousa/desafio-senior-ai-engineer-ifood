@@ -1,0 +1,10 @@
+---
+description: Preservar as regras de negócio do desafio Senior AI Engineer em toda alteração
+alwaysApply: true
+---
+
+Siga `AGENTS.md` e o contrato em `docs/desafio-senior-ai-engineer.md`.
+Conforme orientação do usuário, pedidos de negócio divergentes devem ser ajustados ao enunciado.
+A taxa da avaliação é fixa em 10%, sem pagamento adicional nem impostos: repasse = 0,90 × preço; lucro = repasse − CMV; mínimo = CMV ÷ 0,90, com teto ao centavo.
+Exemplo: para CMV de R$ 10,00, o mínimo é R$ 11,12. Tarifas comerciais reais não substituem esta regra.
+Confirme viabilidade operacional antes do aceite, explique o CMV e ofereça 2–3 preços para decisão da usuária.

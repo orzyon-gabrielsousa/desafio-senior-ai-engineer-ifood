@@ -1,4 +1,5 @@
 import type { ChatMessage, Conversation, ToolTrace } from "../types";
+import { contextoLongo, respostaVisivel } from "./chat";
 
 const KEY = "sabor-da-maria.playground.v1";
 const QUEUE_PREFIX = `${KEY}.pendente.`;
@@ -58,15 +59,16 @@ export function asConversation(value: unknown): Conversation | null {
   const messages = item.messages.filter(isMessage).map((message) => ({
     id: message.id,
     role: message.role,
-    content: message.content,
+    content: message.role === "assistant" ? respostaVisivel(message.content) : message.content,
     webSearch: message.webSearch === true,
     cadastroEnviado: message.cadastroEnviado === "negocio" || message.cadastroEnviado === "cozinha"
       ? message.cadastroEnviado : undefined,
+    descartaSugestoes: message.descartaSugestoes === true,
     // Passo que estava rodando quando a página fechou foi interrompido: não fica girando para sempre.
     tools: Array.isArray(message.tools)
       ? message.tools.filter(isTool).map((tool) => (tool.status === "running" ? { ...tool, status: "error" as const } : tool))
       : [],
-    error: message.error === true,
+    error: message.error === true || (message.role === "assistant" && contextoLongo(message.content)),
     pending: false,
     at: typeof message.at === "number" ? message.at : undefined,
   }));

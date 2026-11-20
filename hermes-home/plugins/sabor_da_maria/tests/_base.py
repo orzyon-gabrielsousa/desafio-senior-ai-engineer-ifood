@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sabor_da_maria import falas
+from sabor_da_maria import falas, pesquisa
 
 REPO = Path(__file__).resolve().parents[4]
 XLSX = REPO / "data" / "despensa_dona_maria.xlsx"
@@ -32,6 +32,7 @@ class StoreTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         falas.esquecer_tudo()
+        pesquisa.esquecer_tudo()
         self._tmp = tempfile.TemporaryDirectory()
         self._env = {k: os.environ.get(k) for k in ("SABOR_DA_MARIA_DB", "SABOR_DA_MARIA_XLSX", "SABOR_DA_MARIA_ORCAMENTO", "HERMES_HOME")}
         os.environ["HERMES_HOME"] = self._tmp.name
@@ -47,3 +48,4 @@ class StoreTestCase(unittest.TestCase):
                 os.environ[k] = v
         self._tmp.cleanup()
         falas.esquecer_tudo()
+        pesquisa.esquecer_tudo()

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sabor_da_maria import analytics, api, costing, cozinha, falas, painel, tools
+from sabor_da_maria import analytics, api, costing, cozinha, falas, jornada, painel, tools
 from sabor_da_maria.store import Store
 
 from ._base import REPO, SESSAO, StoreTestCase, diz
@@ -161,13 +161,13 @@ class TelaGravaNoBancoTests(StoreTestCase):
     def test_o_que_ela_marcou_vale_para_as_travas_do_cardapio(self):
         marcar(**COZINHA_COMPLETA)
         marcar(equipamentos={"forno": False})
-        receita = call("receita_conferir_ingredientes", nome="Carne moída gratinada", porcoes=4,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Carne moída gratinada", porcoes=4,
                        ingredientes=[{"nome": "carne moída", "quantidade": 500, "unidade": "g"}], equipamentos_necessarios=["forno"], tecnicas_necessarias=["refogado"])
         self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
         self.assertEqual(receita["equipamentos"]["faltando"], ["forno"])
         self.assertEqual(receita["tecnicas"]["ok"], ["refogado"])  # a habilidade marcada na tela atende o nome que a receita usa
         marcar(equipamentos={"forno": True})
-        receita = call("receita_conferir_ingredientes", nome="Carne moída gratinada", porcoes=4,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Carne moída gratinada", porcoes=4,
                        ingredientes=[{"nome": "carne moída", "quantidade": 500, "unidade": "g"}], equipamentos_necessarios=["forno"], tecnicas_necessarias=["refogado"])
         self.assertEqual(receita["veredito"], "viavel", receita["bloqueios"])
 
@@ -393,7 +393,7 @@ class AvisosNasToolsTests(StoreTestCase):
         self.assertEqual(out["alerta_da_cozinha"]["status"], "nao_da")
         self.assertTrue(out["diga_a_dona_maria"].startswith("Atenção: Com a sua cozinha não dá para fazer Pizza de calabresa"))
         self.assertIn("Massa de pizza precisa de forno para virar pizza", out["diga_a_dona_maria"])
-        self.assertIn("saldo R$ 60,00", out["diga_a_dona_maria"])  # o aviso vem antes do prato e do saldo, que continuam lá
+        self.assertIn("disponível para novas compras R$ 60,00", out["diga_a_dona_maria"])
         self.assertEqual(len(Store().carrinho_itens()), 2)
 
     def test_aviso_aparece_no_estado_da_tela_enquanto_a_cozinha_nao_faz(self):
@@ -410,13 +410,13 @@ class AvisosNasToolsTests(StoreTestCase):
         self.assertTrue(out["success"])
         self.assertEqual(out["alerta_da_cozinha"]["status"], "nao_da")
         self.assertIn("não tem como fazer pizza com esse ingrediente", out["diga_a_dona_maria"])
-        self.assertTrue(out["diga_a_dona_maria"].endswith("saldo R$ 72,00"))
+        self.assertTrue(out["diga_a_dona_maria"].endswith("disponível para novas compras R$ 72,00"))
         self.assertEqual([a["item_id"] is not None for a in api.estado()["alertas"]], [True])
 
     def test_ingrediente_comum_nao_gera_aviso(self):
         out = call("carrinho_adicionar", nome="couve", preco_total=12)
         self.assertNotIn("alerta_da_cozinha", out)
-        self.assertEqual(out["diga_a_dona_maria"], "orçamento R$ 80,00 · no carrinho R$ 12,00 · saldo R$ 68,00")
+        self.assertEqual(out["diga_a_dona_maria"], "orçamento R$ 80,00 · despesas R$ 0,00 · saldo R$ 80,00 · no carrinho R$ 12,00 · disponível para novas compras R$ 68,00")
 
     def test_prato_lembra_de_completar_a_cozinha_antes_de_comprar(self):
         out = call("carrinho_adicionar_prato", prato="Bolo de cenoura", ingredientes=[{"nome": "cenoura", "quantidade": 1, "unidade": "kg", "preco_total": 6}])
@@ -433,9 +433,9 @@ class AvisosNasToolsTests(StoreTestCase):
         self.assertEqual((pizza["prato"], pizza["cozinha_dela"]), ("Pizza de calabresa", "nao_da"))
         self.assertIn("forno", pizza["aviso_da_cozinha"])
         qc = pizza["quanto_cobrar"]
-        self.assertEqual((qc["custo_tipico_de_exemplo"], qc["cobrar_no_minimo_sem_prejuizo"]), (16.0, 18.86))
+        self.assertEqual((qc["custo_tipico_de_exemplo"], qc["cobrar_no_minimo_sem_prejuizo"]), (16.0, 17.78))
         self.assertIn("para_sobrar_30_por_cento", qc)
-        self.assertIn("1) Pizza de calabresa (~R$ 52,00; cobrar a partir de R$ 18,86) [NÃO dá na cozinha dela: forno]", out["diga_a_dona_maria"])
+        self.assertIn("1) Pizza de calabresa (~R$ 52,00; cobrar a partir de R$ 17,78) [NÃO dá na cozinha dela: forno]", out["diga_a_dona_maria"])
         self.assertIn("base de exemplo", out["diga_a_dona_maria"])
         self.assertIn("Com o custo real da receita o preço muda", out["diga_a_dona_maria"])
 
@@ -443,7 +443,7 @@ class AvisosNasToolsTests(StoreTestCase):
         marcar(**COZINHA_COMPLETA)
         marcar(equipamentos={"forno": False, "forma": True}, habilidades={"massa_fermentada": "sim", "assar": "sim"})
         # o modelo NÃO listou o forno em equipamentos_necessarios: a ficha da pizza lista por ele
-        receita = call("receita_conferir_ingredientes", nome="Pizza de calabresa", porcoes=2,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Pizza de calabresa", porcoes=2,
                        ingredientes=[{"nome": "farinha de trigo", "quantidade": 300, "unidade": "g"}, {"nome": "queijo mussarela", "quantidade": 200, "unidade": "g"}])
         self.assertEqual(receita["veredito"], "inviavel_por_enquanto")
         self.assertEqual([b["tipo"] for b in receita["bloqueios"]], ["equipamento_faltando"])
@@ -456,7 +456,7 @@ class AvisosNasToolsTests(StoreTestCase):
     def test_receita_de_prato_da_base_com_tudo_resolvido_passa(self):
         marcar(**COZINHA_COMPLETA)
         marcar(equipamentos={"forma": True}, habilidades={"massa_fermentada": "sim", "assar": "sim"})
-        receita = call("receita_conferir_ingredientes", nome="Pizza de calabresa", porcoes=2,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Pizza de calabresa", porcoes=2,
                        ingredientes=[{"nome": "farinha de trigo", "quantidade": 300, "unidade": "g"}, {"nome": "queijo mussarela", "quantidade": 200, "unidade": "g"}])
         self.assertEqual(receita["veredito"], "viavel", receita["bloqueios"])
         self.assertEqual(receita["avisos_da_cozinha"], [])
@@ -464,7 +464,7 @@ class AvisosNasToolsTests(StoreTestCase):
 
     def test_ficha_pede_confirmacao_do_que_ela_nao_respondeu(self):
         marcar(**COZINHA_COMPLETA)  # forma e as habilidades da pizza ficaram sem resposta
-        receita = call("receita_conferir_ingredientes", nome="Pizza de calabresa", porcoes=2,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Pizza de calabresa", porcoes=2,
                        ingredientes=[{"nome": "farinha de trigo", "quantidade": 300, "unidade": "g"}])
         self.assertEqual(receita["veredito"], "precisa_confirmar")
         tipos = {b["tipo"] for b in receita["bloqueios"]}
@@ -474,7 +474,7 @@ class AvisosNasToolsTests(StoreTestCase):
     def test_nao_repete_o_que_o_modelo_ja_listou(self):
         marcar(**COZINHA_COMPLETA)
         marcar(equipamentos={"forno": False})
-        receita = call("receita_conferir_ingredientes", nome="Pizza de calabresa", porcoes=2,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Pizza de calabresa", porcoes=2,
                        ingredientes=[{"nome": "farinha de trigo", "quantidade": 300, "unidade": "g"}], equipamentos_necessarios=["Forno elétrico"])
         self.assertEqual(receita["equipamentos"]["faltando"], ["Forno elétrico"])  # uma vez só, com o nome do modelo
 
@@ -561,7 +561,7 @@ class SalvarComOModeloReal(StoreTestCase):
         out = call("perfil_cozinha_salvar", equipamentos={"fogão": 4, "forno": True, "air fryer": False}, tecnicas={"refogado": "sim"})
         self.assertEqual(out["diga_a_dona_maria"],
                          "Salvei na sua cozinha. Você tem: fogão (4 bocas), forno; Não tem: air fryer; Sabe: refogar e temperar. "
-                         "Você vê e corrige tudo em Minha cozinha (menu). Ainda falta saber: equipamentos e utensílios, rotina da cozinha.")
+                         "Se algo estiver errado, pode me corrigir aqui no chat. Ainda falta saber: equipamentos e utensílios, rotina da cozinha.")
         self.assertIn("3. **Rotina da cozinha:**", out["perguntas_prontas"].replace("2. **Rotina", "3. **Rotina"))  # só o que falta
         self.assertNotIn("Técnicas que você domina", out["perguntas_prontas"])
         marcar(**COZINHA_COMPLETA)
@@ -574,43 +574,42 @@ class SalvarComOModeloReal(StoreTestCase):
 
 
 class PainelDaCozinhaTests(StoreTestCase):
-    def test_primeira_mensagem_manda_perguntar_ja_na_primeira_resposta(self):
+    def test_primeira_mensagem_conduz_cadastro_sem_interrogatorio_da_cozinha(self):
         texto = painel.texto_do_painel(primeira_mensagem=True)
-        self.assertIn("NEGÓCIO E COZINHA INCOMPLETOS E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
-        self.assertIn("faça JÁ NESTA RESPOSTA as perguntas abaixo", texto)
-        for pergunta in ("quantas bocas", "forno", "panela de pressão", "air fryer", "liquidificador", "molho béchamel", "ponto da carne",
-                         "geladeira", "gás", "energia", "cozinhada"):  # o que o desafio manda descobrir da cozinha
-            self.assertIn(pergunta, texto)
-        for pergunta in ("país, estado e cidade", "zona da cidade", "tipo de negócio", "Tipo de alimentação que você faz"):  # e o que o negócio precisa
-            self.assertIn(pergunta, texto)
-        self.assertIn("negocio_salvar", texto)
-        self.assertIn("ainda não marcou nada em Minha cozinha", texto)
+        self.assertIn("Conheça o negócio aos poucos", texto)
+        self.assertIn("Pergunta inicial do negócio:", texto)
+        self.assertIn("Pergunta inicial do negócio: É um restaurante", texto)
+        self.assertNotIn("PERGUNTAS PARA FAZER", texto)
+        self.assertNotIn("Tem liquidificador?", texto)
+        self.assertIn("cadastro geral da cozinha está parcial", texto)
+        self.assertIn("não apresente um interrogatório", texto)
 
-    def test_so_a_cozinha_incompleta_nao_pergunta_do_negocio(self):
+    def test_negocio_conhecido_conduz_receita_mesmo_com_cozinha_parcial(self):
         negocio_completo()
+        jornada.responder(Store(), "confirmar_estoque")
+        jornada.responder(Store(), "ajuda_ia")
         texto = painel.texto_do_painel(primeira_mensagem=True)
-        self.assertIn("COZINHA INCOMPLETA E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
-        self.assertNotIn("Sobre o negócio", texto)
-        self.assertNotIn("negocio_salvar", texto)
-        self.assertIn("Antes de escolhermos um prato, preciso saber se a sua cozinha dá conta.", texto)
+        self.assertIn("Etapa: pesquisa", texto)
+        self.assertIn("requisitos relevantes da cozinha", texto)
+        self.assertNotIn("Pergunta inicial do negócio", texto)
+        self.assertNotIn("Tem liquidificador?", texto)
 
-    def test_hook_usa_o_is_first_turn_do_hermes(self):
+    def test_hook_mantem_continuidade_entre_turnos_sem_reabrir_checklist(self):
         primeiro = painel.ao_iniciar_turno(session_id="s", user_message="oi", conversation_history=[], is_first_turn=True)["context"]
-        self.assertIn("PRIMEIRA MENSAGEM DA CONVERSA", primeiro)
         depois = painel.ao_iniciar_turno(session_id="s", user_message="oi", conversation_history=[], is_first_turn=False)["context"]
-        self.assertNotIn("PRIMEIRA MENSAGEM", depois)
-        self.assertIn("NEGÓCIO E COZINHA INCOMPLETOS (13 perguntas sem resposta)", depois)
-        self.assertIn("releia a última mensagem dela", depois)  # o 8B esquece que ela já respondeu: manda reler antes de perguntar
+        for texto in (primeiro, depois):
+            self.assertIn("CONDUÇÃO DA JORNADA", texto)
+            self.assertNotIn("PERGUNTAS PARA FAZER", texto)
+            self.assertIn("salve com negocio_salvar", texto)
 
-    def test_so_pergunta_o_que_ainda_falta(self):
+    def test_dados_salvos_sao_usados_sem_novo_questionario(self):
         negocio_completo()
         marcar(equipamentos={"fogao": 4, "forno": True, "panela_pressao": True, "air_fryer": False, "liquidificador": True})
         texto = painel.texto_do_painel(primeira_mensagem=True)
         self.assertNotIn("quantas bocas", texto)
-        self.assertNotIn("1. **Equipamentos e utensílios:**", texto)
-        self.assertIn("1. **Técnicas que você domina:**", texto)
-        self.assertIn("2. **Rotina da cozinha:**", texto)
+        self.assertNotIn("PERGUNTAS PARA FAZER", texto)
         self.assertIn("TEM: fogão (4 bocas), forno, liquidificador, panela de pressão; NÃO TEM: air fryer", texto)
+        self.assertIn("Não imponha preencher o catálogo inteiro", texto)
 
     def test_cozinha_completa_nao_pergunta_de_novo(self):
         marcar(**COZINHA_COMPLETA)
@@ -683,13 +682,13 @@ class ApiDaCozinhaTests(StoreTestCase):
         st, r = api.tratar("GET", "/api/analytics?escopo=pais&limite=3")
         self.assertEqual(st, 200)
         pizza = r["ranking"][0]
-        self.assertEqual((pizza["cozinha"]["status"], pizza["preco"]["preco_minimo"]), ("nao_da", 18.86))
-        self.assertEqual(pizza["preco"]["mercado"]["recebe_liquido"], 44.1)
+        self.assertEqual((pizza["cozinha"]["status"], pizza["preco"]["preco_minimo"]), ("nao_da", 17.78))
+        self.assertEqual(pizza["preco"]["mercado"]["recebe_liquido"], 46.8)
 
     def test_precos_para_a_calculadora_da_tela(self):
         st, q = api.tratar("GET", "/api/precos?cmv=9,50&preco=29.40")
-        self.assertEqual((st, q["preco_minimo"], q["mercado"]["lucro"]), (200, 11.2, 15.43))
-        self.assertIsNone(q["mercado"]["impostos"])
+        self.assertEqual((st, q["preco_minimo"], q["mercado"]["lucro"]), (200, 10.56, 16.96))
+        self.assertEqual(q["mercado"]["impostos"], 0)
         self.assertEqual(api.tratar("GET", "/api/precos?cmv=9.5")[1]["mercado"], None)
         for ruim in ("/api/precos", "/api/precos?cmv=0", "/api/precos?cmv=abc", "/api/precos?cmv=9.5&preco=x"):
             self.assertEqual(api.tratar("GET", ruim)[0], 400, ruim)

@@ -5,8 +5,8 @@ Regras do desafio:
 * CMV do prato = Σ (quantidade usada × custo unitário), onde o custo unitário vem
   do cruzamento das abas ``Precos`` e ``Despensa`` (preço total pago ÷ quantidade
   comprada), incluindo compras complementares.
-* Comissão, pagamento pela plataforma e alíquota efetiva estimada incidem sobre o preço bruto.
-  O preço de equilíbrio cobre o CMV com o valor que sobra depois dos descontos.
+* A taxa única da plataforma é 10% sobre o preço bruto, conforme o enunciado.
+  A Dona Maria recebe 0,90 × P e o lucro é 0,90 × P − CMV.
 * O agente propõe 2–3 cenários e deixa a Dona Maria decidir.
 
 Convenção de "margem" aqui: lucro ÷ valor recebido (líquido da taxa). Com margem
@@ -22,16 +22,16 @@ from typing import Any, Iterable, Optional
 
 from . import taxas
 
-TAXA_PADRAO = 0.10
+TAXA_PADRAO = taxas.TAXA_PLATAFORMA
 MARGENS_PADRAO = (0.30, 0.50, 0.65)
 NOMES_PADRAO = ("Conservador", "Equilibrado", "Confortável")
 
 
 def brl(value: float) -> str:
     """``12.5`` -> ``"R$ 12,50"``."""
-    sign = "-" if value < 0 else ""
-    value = abs(value)
-    inteiro, centavos = divmod(round(value * 100), 100)
+    monetario = _dinheiro(Decimal(str(value)))
+    sign = "-" if monetario < 0 else ""
+    inteiro, centavos = divmod(int(abs(monetario) * 100), 100)
     inteiro_txt = f"{inteiro:,}".replace(",", ".")
     return f"{sign}R$ {inteiro_txt},{centavos:02d}"
 
@@ -47,70 +47,80 @@ def round_up_to(value: float, step: float = 0.50) -> float:
 
 
 def preco_minimo(cmv: float, taxa: float = TAXA_PADRAO) -> float:
-    return cmv / (1.0 - taxa)
+    return cmv / (1.0 - TAXA_PADRAO)
 
 
 def preco_minimo_centavo(cmv: float, taxa: float = TAXA_PADRAO, *, perfil: dict[str, Any] | None = None) -> float:
     """Primeiro preço, em centavos inteiros, que cobre o CMV depois da taxa."""
-    if perfil is not None:
-        return _primeiro_preco(cmv, perfil)
-    return math.ceil(round(preco_minimo(cmv, taxa) * 100, 9)) / 100
+    return _primeiro_preco(cmv, perfil)
 
 
 _CENTAVO = Decimal("0.01")
-_MEIO_CENTAVO = Decimal("0.005")
 
 
 def _dinheiro(valor: Decimal) -> Decimal:
     return valor.quantize(_CENTAVO, rounding=ROUND_HALF_UP)
 
 
+def arredondar_moeda(valor: float) -> float:
+    return float(_dinheiro(Decimal(str(valor))))
+
+
+def custo_por_porcao(cmv_total: float, porcoes: float) -> float:
+    """Divide os dados decimais do lote antes de converter para float.
+
+    A divisão binária 4,32 / 3 produz 1,4400000000000002, o que subiria o
+    preço mínimo de 1,60 para 1,61 ao aplicar o teto em centavos.
+    """
+    return float(Decimal(str(cmv_total)) / Decimal(str(porcoes)))
+
+
 def _descontos(preco: Decimal, componentes: tuple[Decimal, ...]) -> tuple[Decimal, ...]:
     return tuple(_dinheiro(preco * taxa) for taxa in componentes)
 
 
-def _primeiro_preco(cmv: float, perfil: dict[str, Any], *, com_sobra: bool = False) -> float:
-    componentes = tuple(Decimal(str(taxa)) for taxa in taxas.componentes(perfil))
-    alvo = _dinheiro(Decimal(str(cmv))) + (_CENTAVO if com_sobra else 0)
-    # Cada desconto arredondado pode reduzir a dedução teórica em até meio centavo.
-    # Começa nesse limite para não pular um centavo que cubra o custo.
-    folga = _MEIO_CENTAVO * sum(taxa > 0 for taxa in componentes)
-    limite = (alvo - folga) / (1 - sum(componentes))
-    preco = max(_CENTAVO if com_sobra else Decimal(0), limite.quantize(_CENTAVO, rounding=ROUND_CEILING))
-    while preco - sum(_descontos(preco, componentes)) < alvo:
-        preco += _CENTAVO
-    return float(preco)
+def _primeiro_preco(cmv: float, perfil: dict[str, Any] | None = None, *, com_sobra: bool = False) -> float:
+    # O teto aplica a desigualdade do enunciado antes do arredondamento monetário.
+    # CMV 10 exige P >= 11,111…; a tela deve oferecer 11,12, nunca 11,11.
+    alvo = Decimal(str(cmv)) + (_CENTAVO if com_sobra else 0)
+    limite = alvo / Decimal("0.90")
+    return float(limite.quantize(_CENTAVO, rounding=ROUND_CEILING))
 
 
 def avaliar_preco(preco: float, cmv: float, taxa: float = TAXA_PADRAO, *, perfil: dict[str, Any] | None = None) -> dict:
     """Tudo que acontece com um preço ``P`` dado."""
-    taxas_ativas = taxas.componentes(perfil) if perfil is not None else (taxa, 0.0, 0.0)
     bruto = _dinheiro(Decimal(str(preco)))
-    comissao, pagamento, imposto = _descontos(bruto, tuple(Decimal(str(t)) for t in taxas_ativas))
-    ifood = comissao + pagamento
-    liquido = float(bruto - ifood - imposto)
-    custo = float(_dinheiro(Decimal(str(cmv))))
-    lucro = float(bruto - ifood - imposto - Decimal(str(custo)))
+    custo_exato = Decimal(str(cmv))
+    # O enunciado define o repasse e o lucro antes do arredondamento. Descontar
+    # uma comissão já arredondada distorce os casos de meio centavo (11,15).
+    taxa_exata = bruto * Decimal("0.10")
+    repasse_exato = bruto * Decimal("0.90")
+    lucro_exato = repasse_exato - custo_exato
+    comissao = float(_dinheiro(taxa_exata))
+    liquido = float(_dinheiro(repasse_exato))
+    custo = float(_dinheiro(custo_exato))
+    lucro = float(_dinheiro(lucro_exato))
     return {
         "preco": float(bruto),
-        "taxa_plataforma": float(ifood),
-        "taxa_comissao": float(comissao),
-        "taxa_pagamento": float(pagamento),
-        "impostos": float(imposto) if perfil is None or perfil["imposto"] is not None else None,
-        "repasse_ifood": float(bruto - ifood),
+        "taxa_plataforma": comissao,
+        "taxa_comissao": comissao,
+        "taxa_pagamento": 0.0,
+        "impostos": 0.0,
+        "repasse_ifood": liquido,
         "recebe_liquido": liquido,
         "cmv": custo,
         "lucro": lucro,
-        "margem_sobre_liquido": round(lucro / liquido, 4) if liquido else None,
-        "margem_sobre_preco": round(lucro / preco, 4) if preco else None,
-        "food_cost": round(cmv / liquido, 4) if liquido else None,
-        "markup": round(preco / cmv, 2) if cmv else None,
-        "viavel": lucro >= -1e-9,
+        "margem_sobre_liquido": round(float(lucro_exato / repasse_exato), 4) if repasse_exato else None,
+        "margem_sobre_preco": round(float(lucro_exato / bruto), 4) if bruto else None,
+        "food_cost": round(float(custo_exato / repasse_exato), 4) if repasse_exato else None,
+        "markup": round(float(bruto / custo_exato), 2) if custo_exato else None,
+        "viavel": repasse_exato >= custo_exato,
         "explicacao": (
-            f"Preço {brl(preco)} → taxas iFood {brl(float(ifood))} → "
-            + ("impostos pendentes" if perfil is not None and perfil["imposto"] is None else f"impostos {brl(float(imposto))}")
-            + f" → líquido estimado {brl(liquido)} → menos CMV {brl(custo)} = sobra {brl(lucro)}"
-            + (f" ({pct(lucro / liquido)} do que recebe)" if liquido else "")
+            f"Preço {brl(float(bruto))} × 10% ≈ taxa {brl(comissao)}; "
+            f"0,90 × {brl(float(bruto))} ≈ recebe {brl(liquido)}; "
+            f"menos CMV {brl(custo)} ≈ lucro {brl(lucro)}"
+            + (f" ({pct(float(lucro_exato / repasse_exato))} do que recebe)" if repasse_exato else "")
+            + ". Valores exibidos arredondados ao centavo; o cálculo usa o CMV sem arredondamento por porção."
         ),
     }
 
@@ -124,32 +134,33 @@ def cenarios_preco(
     *,
     perfil: dict[str, Any] | None = None,
 ) -> dict:
-    cmv = float(_dinheiro(Decimal(str(cmv_porcao))))
-    taxa = float(taxa)
-    comissao, pagamento, imposto = taxas.componentes(perfil) if perfil is not None else (taxa, 0.0, 0.0)
+    cmv = float(cmv_porcao)
+    taxa = TAXA_PADRAO
+    comissao, pagamento, imposto = TAXA_PADRAO, 0.0, 0.0
     deducoes = round(comissao + pagamento + imposto, 12)
     margens_lista = [float(m) for m in (margens or MARGENS_PADRAO)]
+    if len(margens_lista) not in (2, 3) or any(not math.isfinite(m) or not 0 < m < 1 for m in margens_lista):
+        raise ValueError("escolha 2 ou 3 margens entre 0 e 1 para comparar os cenários")
     nomes_lista = list(nomes or NOMES_PADRAO)
     minimo = preco_minimo_centavo(cmv, taxa, perfil=perfil)
-    com_sobra = _primeiro_preco(cmv, perfil, com_sobra=True) if perfil is not None else round_up_to((cmv + 0.005) / (1 - taxa), 0.01)
+    com_sobra = _primeiro_preco(cmv, perfil, com_sobra=True)
     saida = {
-        "cmv_por_porcao": round(cmv, 2),
+        "cmv_por_porcao": arredondar_moeda(cmv),
         "taxa_plataforma": round(comissao + pagamento, 12),
         "taxa_comissao": comissao,
         "taxa_pagamento": pagamento,
-        "taxa_impostos": None if perfil is not None and perfil["imposto"] is None else imposto,
+        "taxa_impostos": 0.0,
         "preco_minimo": minimo,
         "preco_minimo_com_sobra": com_sobra,
         "preco_minimo_explicacao": (
-            f"CMV por porção de {brl(cmv)} e descontos considerados de {pct(deducoes)}. "
-            f"Equilíbrio estimado {brl(minimo)}. Primeiro preço com sobra de pelo menos um centavo {brl(com_sobra)}."
+            f"CMV por porção de {brl(cmv)} ÷ 0,90 → mínimo {brl(minimo)} "
+            f"(arredondado para cima). A plataforma fica com 10% e a Dona Maria recebe 90%. "
+            f"Primeiro preço com lucro de pelo menos um centavo: {brl(com_sobra)}."
         ),
-        "formula": "Preço teórico = CMV ÷ ((1 − descontos) × (1 − margem)); sobra = preço − descontos em reais − CMV",
+        "formula": "Preço teórico = CMV ÷ (0,90 × (1 − margem)); lucro = 0,90 × preço − CMV",
         "cenarios": [],
     }
     for i, margem in enumerate(margens_lista):
-        if margem >= 1:
-            continue
         fator = (1.0 - deducoes) * (1.0 - margem)
         preco_exato = cmv / fator
         sugerido = round_up_to(preco_exato, arredondar_para)
@@ -191,6 +202,6 @@ def quanto_cobrar(cmv: float, preco_mercado: Optional[float] = None, taxa: float
                  "recebe": c["com_preco_sugerido"]["recebe_liquido"], "lucro": c["com_preco_sugerido"]["lucro"]}
                 for c in base["cenarios"]]
     mercado = avaliar_preco(float(preco_mercado), cmv, taxa, perfil=perfil) if preco_mercado else None
-    return {"cmv": round(cmv, 2), "taxa": base["taxa_plataforma"], "taxa_impostos": base["taxa_impostos"],
+    return {"cmv": arredondar_moeda(cmv), "taxa": base["taxa_plataforma"], "taxa_impostos": base["taxa_impostos"],
             "preco_minimo": minimo, "preco_minimo_com_sobra": base["preco_minimo_com_sobra"], "cenarios": cenarios, "mercado": mercado,
             "formula": base["formula"]}

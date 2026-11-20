@@ -11,6 +11,7 @@ houver dúvida, em vez de assumir.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .units import norm_text
@@ -84,6 +85,54 @@ def canonical_query(text: str) -> str:
     return n
 
 
+@dataclass(frozen=True)
+class PreparoCaseiro:
+    padrao: str
+    materia_prima: str
+    rendimento: float
+    minutos: int
+    equipamentos: tuple[str, ...]
+    tecnicas: tuple[str, ...]
+    preparo: str
+
+
+# Rendimentos locais de planejamento, não medidas da publicação. Só preparos
+# simples de um ingrediente com água; temperos adicionais pertencem à ficha.
+PREPAROS_CASEIROS = (
+    PreparoCaseiro(r"(?:molho|pure|passata) de tomate", "Tomate", 0.8, 20,
+                  ("fogão",), (),
+                  "Pique e cozinhe os tomates com água potável apenas se necessário; amasse e reduza até obter o molho."),
+    PreparoCaseiro(r"pure de batata", "Batata", 0.85, 25,
+                  ("fogão",), (),
+                  "Descasque, cozinhe e amasse a batata; use um pouco da água do cozimento para um purê simples, sem leite ou manteiga adicionais."),
+    PreparoCaseiro(r"arroz(?: branco)? cozido", "Arroz branco tipo 1", 2.5, 20,
+                  ("fogão",), ("arroz e feijão",),
+                  "Cozinhe o arroz cru em água potável até o ponto; o peso cozido inclui a água absorvida."),
+    PreparoCaseiro(r"feijao(?: carioca| carioquinha)? cozido", "Feijão carioquinha", 2.0, 40,
+                  ("fogão", "panela de pressão"), ("arroz e feijão",),
+                  "Cozinhe o feijão em água potável na panela de pressão até ficar macio; considere o peso escorrido."),
+    PreparoCaseiro(r"feijao preto cozido", "Feijão preto", 2.0, 40,
+                  ("fogão", "panela de pressão"), ("arroz e feijão",),
+                  "Cozinhe o feijão preto em água potável na panela de pressão até ficar macio; considere o peso escorrido."),
+    PreparoCaseiro(r"(?:peito de )?frango (?:(?:cozido e |cozido )?desfiado|cozido)", "Peito de frango", 0.75, 25,
+                  ("fogão",), ("refogar",),
+                  "Cozinhe o peito de frango completamente em água potável e desfie se a receita pedir; nunca use o frango cru como produto pronto."),
+)
+
+
+def preparo_caseiro_entre(ingrediente: str, candidato: str) -> PreparoCaseiro | None:
+    """Transformação direcional, separada do matching: matéria-prima não é produto pronto."""
+    nome = re.sub(r"\s+(?:a gosto|quanto baste)$", "", norm_text(ingrediente))
+    nome = re.sub(r"^\d+(?:[.,]\d+)?\s*(?:kg|g|ml|l)\s+(?:de\s+)?", "", nome)
+    nome = " ".join(_SINGULAR.get(w, w) for w in nome.split() if w not in {"caseiro", "caseira"})
+    for preparo in PREPAROS_CASEIROS:
+        if (re.fullmatch(preparo.padrao, nome)
+                and tokens(candidato) == tokens(preparo.materia_prima)
+                and not re.search(r"\b(?:cozid[oa]|desfiad[oa]|pront[oa]|industrializad[oa])\b", norm_text(candidato))):
+            return preparo
+    return None
+
+
 def _corte_frango(texto: str) -> str | None:
     nome = norm_text(texto)
     if re.search(r"\b(?:coxinhas? da asa|drumettes?)\b", nome):
@@ -102,8 +151,17 @@ def cortes_incompativeis(ingrediente: str, candidato: str) -> bool:
     return corte is not None and corte != _corte_frango(candidato)
 
 
+def formas_incompativeis(ingrediente: str, candidato: str) -> bool:
+    a, b = tokens(ingrediente), tokens(candidato)
+    for principal, preparos in (("tomate", {"molho", "extrato", "passata", "pure", "pelado", "seco"}),
+                               ("batata", {"palha", "chips", "congelada", "pure"})):
+        if principal in a and principal in b:
+            return a & preparos != b & preparos
+    return False
+
+
 def score(query: str, candidate: str) -> float:
-    if cortes_incompativeis(query, candidate):
+    if cortes_incompativeis(query, candidate) or formas_incompativeis(query, candidate):
         return 0.0
     q_can = canonical_query(query)
     q_tok = tokens(q_can) | tokens(query)

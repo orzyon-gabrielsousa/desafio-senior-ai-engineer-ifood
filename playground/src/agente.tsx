@@ -10,7 +10,11 @@ const CAPACIDADES = [
   { icon: StoreIcon, titulo: "Negócio e despensa", texto: "Usa o perfil do seu negócio, os ingredientes e os preços salvos para orientar o cardápio." },
   { icon: GlobeIcon, titulo: "Receitas na web", texto: "Pesquisa receitas, lê as páginas e mostra as fontes para você comparar as opções." },
   { icon: KitchenIcon, titulo: "Cozinha e compras", texto: "Confere equipamentos, técnicas e ingredientes. Aponta as compras que cabem no saldo." },
+  { icon: KitchenIcon, titulo: "Adaptação à despensa", texto: "Aproveita derivados e substitutos disponíveis, salva a ficha com as faltas anotadas e encaminha a próxima decisão. Skill adaptacao-despensa." },
+  { icon: ChartIcon, titulo: "Gestão de estoque e despesas", texto: "No aceite da ficha, registra o lote com os ingredientes e as quantidades da despensa e atualiza as despesas e o saldo." },
   { icon: ChartIcon, titulo: "Custos e cardápio", texto: "Calcula o custo por porção, compara cenários de preço e registra a sua escolha no cardápio." },
+  { icon: ChartIcon, titulo: "Vendas realizadas", texto: "Registra as vendas que você informar e acompanha faturamento e resultado estimado por dia, semana e mês." },
+  { icon: ChartIcon, titulo: "Plano de divulgação", texto: "Usa o preço e a margem do cardápio para preparar textos, ações e metas de divulgação reaproveitáveis." },
 ];
 
 type Props = {

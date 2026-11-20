@@ -5,10 +5,11 @@ import { brl, chave, lerNumero, quantidade } from "./lib/format";
 import { agrupar, contarItens } from "./lib/loja";
 import type { GrupoPrato } from "./lib/loja";
 import { Sheet } from "./sheet";
-import type { Acao, AlertaCozinha, CarrinhoAcoes, Estado, ItemCarrinho, LinhaPrato, Salvo } from "./types";
+import type { Acao, AlertaCozinha, CarrinhoAcoes, CompraHistorico, Estado, HistoricoCompras, ItemCarrinho, LinhaPrato, Salvo } from "./types";
 
 const UNIDADES = ["un", "kg", "g", "L", "ml", "maço", "dúzia", "pacote"];
 const MAX_LINHAS = 40;
+const DATA_COMPRA = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short" });
 
 /** Roda uma ação da tela e mostra o resultado no aviso fixo do painel; devolve true quando deu certo. */
 type Executar = (acao: Acao, feito?: string) => Promise<boolean>;
@@ -80,60 +81,142 @@ function Linha({
 function OrcamentoCard({ estado }: { estado: Estado | null }) {
   const o = estado?.orcamento;
   if (!o) return <p className="sheet-note error">Não consegui ler o carrinho. Confere se o make run está rodando (a API precisa estar no ar).</p>;
-  const usado = o.inicial > 0 ? Math.min(100, Math.max(0, ((o.comprometido + o.carrinho) / o.inicial) * 100)) : 0;
-  const { gasto_confirmado, reservado_cardapio } = o;
-  const comprasPagas = estado?.compras_pagas ?? [];
+  const despesas = o.despesas ?? (o.comprometido + o.carrinho);
+  const saldo = o.saldo_gerencial ?? o.saldo;
+  const usado = o.inicial > 0 ? Math.min(100, Math.max(0, (despesas / o.inicial) * 100)) : 0;
+  const { gasto_confirmado, reservado_cardapio, despesa_despensa } = o;
   return (
     <section className="budget-card" aria-label="Orçamento">
       <dl>
         <div>
-          <dt>Orçamento para complementos</dt>
+          <dt>Orçamento</dt>
           <dd>{brl(o.inicial)}</dd>
         </div>
-        {gasto_confirmado != null && reservado_cardapio != null ? (
-          <>
-            <div>
-              <dt>Compras já pagas</dt>
-              <dd>{brl(gasto_confirmado)}</dd>
-            </div>
-            <div>
-              <dt>Reservado para o cardápio</dt>
-              <dd>{brl(reservado_cardapio)}</dd>
-            </div>
-          </>
-        ) : o.comprometido > 0 ? (
-          <div>
-            <dt>Compras lançadas ou comprometidas</dt>
-            <dd>{brl(o.comprometido)}</dd>
-          </div>
-        ) : null}
         <div>
-          <dt>A comprar no carrinho</dt>
-          <dd>{brl(o.carrinho)}</dd>
+          <dt>Despesas</dt>
+          <dd>{brl(despesas)}</dd>
         </div>
-        <div className={o.saldo <= 0 ? "saldo none" : "saldo"}>
-          <dt>Saldo disponível</dt>
-          <dd>{brl(o.saldo)}</dd>
+        <div className={saldo <= 0 ? "saldo none" : "saldo"}>
+          <dt>Saldo</dt>
+          <dd>{brl(saldo)}</dd>
         </div>
       </dl>
-      <div className="meter" role="img" aria-label={`${Math.round(usado)}% do orçamento destinado a compras`}>
+      <div className="meter" role="img" aria-label={`${Math.round(usado)}% do orçamento contabilizado em despesas`}>
         <span style={{ width: `${usado}%` }} />
       </div>
-      <p className="budget-note">Os ingredientes que você já tem entram no custo da receita sem gastar de novo o orçamento de compras.</p>
-      {comprasPagas.length > 0 ? (
-        <details className="budget-paid">
-          <summary>Ver compras pagas</summary>
-          <ul>
-            {comprasPagas.map((compra, posicao) => (
-              <li key={posicao}>
-                <span>{compra.ingrediente} · {quantidade(compra.quantidade, compra.unidade)}</span>
-                <strong>{brl(compra.preco_total)}</strong>
-              </li>
-            ))}
-          </ul>
-        </details>
+      {despesa_despensa != null && despesa_despensa > 0 ? (
+        <p className="budget-note">As despesas incluem {brl(despesa_despensa)} em ingredientes da despensa usados nos lotes.</p>
       ) : null}
+      <details className="budget-purchases">
+        <summary>Disponível para novas compras <strong>{brl(o.saldo)}</strong></summary>
+        <dl>
+          {gasto_confirmado != null && reservado_cardapio != null ? (
+            <>
+              <div><dt>Compras já pagas</dt><dd>{brl(gasto_confirmado)}</dd></div>
+              <div><dt>Verba reservada para os lotes</dt><dd>{brl(reservado_cardapio)}</dd></div>
+            </>
+          ) : <div><dt>Compras lançadas ou comprometidas</dt><dd>{brl(o.comprometido)}</dd></div>}
+          <div><dt>A comprar no carrinho</dt><dd>{brl(o.carrinho)}</dd></div>
+        </dl>
+      </details>
     </section>
+  );
+}
+
+const STATUS_COMPRA: Record<CompraHistorico["status"], string> = {
+  paga: "Paga",
+  comprometida: "Reservada no orçamento",
+  planejada: "Planejada",
+  cancelada: "Cancelada",
+};
+
+const ORIGEM_INSUMO = {
+  despensa: "Da despensa",
+  complemento: "Complemento",
+  preparo: "Recurso de preparo",
+  ficha: "Na ficha aprovada",
+};
+
+const STATUS_LOTE = {
+  preco_pendente: "Aguardando preço",
+  no_cardapio: "No cardápio",
+  encerrado: "Lote encerrado",
+};
+
+function ComprasRegistradas({ compras }: { compras: CompraHistorico[] }) {
+  return (
+    <ul className="linhas">
+      {compras.map((compra) => (
+        <li className="linha" key={compra.id}>
+          <span className="linha-nome">
+            {compra.ingrediente}
+            <small>{[
+              compra.quantidade != null ? quantidade(compra.quantidade, compra.unidade) : null,
+              STATUS_COMPRA[compra.status],
+              DATA_COMPRA.format(new Date(compra.registrado_em)),
+            ].filter(Boolean).join(" · ")}</small>
+          </span>
+          <span className="linha-valor">{brl(compra.valor)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function HistoricoAba({ historico }: { historico: HistoricoCompras | undefined }) {
+  if (!historico?.lotes.length && !historico?.avulsas.length) {
+    return <p className="sheet-note vazio">Os lotes aparecem aqui assim que você aceita a ficha na etapa 4. As compras registradas também ficam neste histórico.</p>;
+  }
+  return (
+    <>
+      {historico.lotes.map((lote) => (
+        <section className="prato" key={lote.id} aria-label={`Lote de ${lote.prato}`}>
+          <header className="prato-head">
+            <div>
+              <strong>{lote.prato}</strong>
+              <small>{[
+                lote.registrado_em ? DATA_COMPRA.format(new Date(lote.registrado_em)) : null,
+                lote.porcoes != null ? quantidade(lote.porcoes, lote.porcoes === 1 ? "porção" : "porções") : null,
+                STATUS_LOTE[lote.status ?? (lote.ativo ? "no_cardapio" : "encerrado")],
+              ].filter(Boolean).join(" · ")}</small>
+            </div>
+            {lote.cmv_total != null ? <span className="prato-total"><small>Custo do lote</small>{brl(lote.cmv_total)}</span> : null}
+          </header>
+          {lote.insumos.length > 0 ? (
+            <div className="historico-lista">
+              <h3>Ingredientes do lote</h3>
+              <ul className="linhas">
+                {lote.insumos.map((insumo, posicao) => (
+                  <li className="linha" key={posicao}>
+                    <span className="linha-nome">
+                      {insumo.ingrediente}
+                      <small>{[
+                        insumo.quantidade,
+                        ORIGEM_INSUMO[insumo.origem],
+                        insumo.derivado ? `Para preparar ${insumo.derivado}` : null,
+                      ].filter(Boolean).join(" · ")}</small>
+                    </span>
+                    {insumo.custo_uso != null ? <span className="linha-valor">{brl(insumo.custo_uso)}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {lote.complementos.length > 0 ? (
+            <div className="historico-lista">
+              <h3>Compras de complementos</h3>
+              <ComprasRegistradas compras={lote.complementos} />
+            </div>
+          ) : null}
+        </section>
+      ))}
+      {historico.avulsas.length > 0 ? (
+        <section className="prato historico-lista">
+          <h3>Outras compras pagas</h3>
+          <ComprasRegistradas compras={historico.avulsas} />
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -180,7 +263,7 @@ function PratoCard({
             valor={linha.preco_total}
             jaTem={linha.ja_tem}
             estimado={linha.estimado}
-            acao={
+            acao={linha.origem === "receita_aceita" ? undefined :
               <button
                 type="button"
                 className="mini"
@@ -618,7 +701,7 @@ type CartSheetProps = {
 };
 
 export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha, onPratos }: CartSheetProps) {
-  const [aba, setAba] = useState<"carrinho" | "salvos">("carrinho");
+  const [aba, setAba] = useState<"carrinho" | "historico" | "salvos">("carrinho");
   const [forma, setForma] = useState<"ingrediente" | "prato">("ingrediente");
   const [erro, setErro] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
@@ -656,14 +739,19 @@ export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha, onPratos }
   };
   const comum: Comum = { ocupado, executar, acoes };
   const alertas = estado?.alertas ?? [];
+  const historico = estado?.historico_compras;
+  const temHistorico = Boolean(historico?.lotes.length || historico?.avulsas.length);
 
   return (
     <Sheet titleId="carrinho-titulo" title="Carrinho" icon={<CartIcon />} onClose={onClose} wide>
       <OrcamentoCard estado={estado} />
 
-      <div className="tabs" role="tablist" aria-label="Carrinho e itens salvos">
+      <div className="tabs cart-tabs" role="tablist" aria-label="Carrinho">
         <button type="button" role="tab" aria-selected={aba === "carrinho"} className={aba === "carrinho" ? "tab on" : "tab"} onClick={() => setAba("carrinho")}>
           Carrinho <b>{total}</b>
+        </button>
+        <button type="button" role="tab" aria-selected={aba === "historico"} className={aba === "historico" ? "tab on" : "tab"} onClick={() => setAba("historico")}>
+          Lotes e compras
         </button>
         <button type="button" role="tab" aria-selected={aba === "salvos"} className={aba === "salvos" ? "tab on" : "tab"} onClick={() => setAba("salvos")}>
           Salvos <b>{salvos.pratos.length + salvos.ingredientes.length}</b>
@@ -679,10 +767,15 @@ export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha, onPratos }
 
           {total === 0 ? (
             <div className="sheet-note vazio">
-              {estado?.pratos_escolhidos?.length ? (
+              {temHistorico ? (
                 <>
-                  Seu carrinho está vazio. Acompanhe a ficha e os custos em Seus pratos.
-                  <div><button type="button" className="link-btn" onClick={onPratos}>Ver seus pratos escolhidos</button></div>
+                  Seu carrinho está vazio. Consulte os lotes aprovados e as compras pagas no histórico.
+                  <div><button type="button" className="link-btn" onClick={() => setAba("historico")}>Ver lotes e compras</button></div>
+                </>
+              ) : estado?.pratos_escolhidos?.length ? (
+                <>
+                  Seu carrinho está vazio. Acompanhe a ficha e os custos em Minha cozinha.
+                  <div><button type="button" className="link-btn" onClick={onPratos}>Ver pratos atuais</button></div>
                 </>
               ) : "O carrinho está vazio. Adicione um prato ou ingrediente abaixo, ou peça sugestões à consultora."}
             </div>
@@ -739,6 +832,8 @@ export function CartSheet({ estado, acoes, onClose, onAsk, onCozinha, onPratos }
             <FormPrato saldo={estado?.orcamento.saldo ?? null} avisar={avisar} {...comum} />
           </div>
         </>
+      ) : aba === "historico" ? (
+        <HistoricoAba historico={historico} />
       ) : (
         <SalvosAba salvos={salvos} aoColocar={() => setAba("carrinho")} {...comum} />
       )}

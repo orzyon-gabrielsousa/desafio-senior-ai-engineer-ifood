@@ -28,7 +28,8 @@ class CatalogoDoNegocioTests(unittest.TestCase):
         self.assertEqual(set(o), {"tipos", "alimentacao", "paises", "estados", "zonas"})
         self.assertEqual(o["paises"], [{"id": "Brasil", "label": "Brasil"}])
         n = negocio.normalizar({"tipo": "pizzaria", "vende": ["pizzas"], "publico": "x", "observacoes": "y"})
-        self.assertEqual(set(n), {"tipo", "alimentacao", "pais", "estado", "cidade", "zona"})  # sem vende, publico nem observacoes
+        self.assertEqual(set(n), {"tipo", "alimentacao", "pais", "estado", "cidade", "zona", "objetivo"})  # sem vende, publico nem observacoes
+        self.assertEqual(n["objetivo"], "")  # pode começar sem inventar uma meta
 
     def test_do_que_ela_diz_para_o_catalogo(self):
         self.assertEqual([negocio.resolver_tipo(x) for x in ("Restaurante de hotel", "restaurante_hotel", "marmitaria", "Pizzaria", "banca")],
@@ -40,14 +41,28 @@ class CatalogoDoNegocioTests(unittest.TestCase):
         self.assertEqual([negocio.resolver_estado(x) for x in ("sp", "São Paulo", "sao paulo zona leste", "Rio Grande do Sul", "rio de janeiro", "Pará", "Marte")],
                          ["SP", "SP", "SP", "RS", "RJ", "PA", None])
 
+    def test_categorias_mencionadas_preservam_ordem_e_distinguem_complementos(self):
+        casos = {
+            "Quero começar vendendo pizza": ["pizza"],
+            "Pizzas caseiras de camarão, salgados e marmitas": ["pizza", "salgados", "marmita"],
+            "Pizza com massa integral e sobremesas": ["pizza", "doces"],
+            "Pizza doce de chocolate": ["pizza"],
+            "Não quero vender marmitas, quero pizzas e massas": ["pizza", "massas"],
+            "Quero vendas previsíveis": [],
+            "Preciso precificar pizzas e pizza": ["pizza"],
+        }
+        for texto, esperado in casos.items():
+            with self.subTest(texto=texto):
+                self.assertEqual(negocio.categorias_mencionadas(texto), esperado)
+
     def test_o_que_falta_perguntar(self):
-        self.assertEqual([p["campo"] for p in negocio.pendencias(None)], ["local", "tipo", "alimentacao"])
+        self.assertEqual([p["campo"] for p in negocio.pendencias(None)], ["tipo", "alimentacao", "local"])
         self.assertEqual(negocio.pendencias(NEGOCIO_COMPLETO), [])
         so_estado = {**NEGOCIO_COMPLETO, "cidade": ""}
         self.assertEqual([p["campo"] for p in negocio.pendencias(so_estado)], ["local"])  # estado sem cidade não basta
         self.assertEqual(negocio.pendencias({**NEGOCIO_COMPLETO, "zona": ""}), [])  # a zona é pedida junto, mas nem toda cidade tem
         self.assertEqual([t for t, _ in negocio.blocos_de_perguntas(negocio.pendencias(None))],
-                         ["Onde fica a loja", "Tipo de negócio", "Tipo de alimentação que você faz"])
+                         ["Tipo de negócio", "Tipo de alimentação que você faz", "Onde fica a loja"])
 
     def test_descricoes_para_a_consultora_e_para_ela(self):
         self.assertIn("ainda não preencheu", negocio.descrever(None))
@@ -86,9 +101,26 @@ class NegocioPelaConversaTests(StoreTestCase):
         self.assertEqual((n["estado"], n["cidade"], n["zona"], n["tipo"], n["alimentacao"], n["pais"]), ("SP", "São Paulo", "leste", "marmitaria", ["marmita", "pizza"], "Brasil"))
         self.assertEqual(api.estado()["negocio"]["alimentacao"], ["marmita", "pizza"])  # a tela de Meu negócio lê o mesmo registro
         self.assertTrue(out["completo"])
-        self.assertEqual(out["diga_a_dona_maria"], "Salvei o seu negócio. É um negócio do tipo marmitaria; faz marmitas, pizzas; fica em Zona Leste, "
-                                                   "São Paulo/SP (região Sudeste). Você vê e corrige tudo em Meu negócio (menu). O negócio está completo.")
+        self.assertIn("ingredientes já comprados", out["diga_a_dona_maria"])
+        self.assertIn("R$ 80,00", out["diga_a_dona_maria"])
+        self.assertIn("Está pronta para começar", out["diga_a_dona_maria"])
+        self.assertEqual(out["diga_a_dona_maria"].count("?"), 1)  # apenas a próxima decisão
+        self.assertEqual(api.estado()["jornada"]["passo"], "estoque")
         self.assertNotIn("perguntas_prontas", out)
+
+    def test_objetivo_guarda_so_a_meta_literal_sem_inventar_numero(self):
+        objetivo = "começar vendendo 20 marmitas por dia sem desperdiçar ingredientes"
+        diz(f"Quero {objetivo}.")
+        out = salvar(objetivo=objetivo)
+        self.assertTrue(out["success"], out)
+        self.assertEqual(out["salvo"], {"objetivo": objetivo})
+        self.assertEqual(Store().negocio()["objetivo"], objetivo)
+
+        diz("Meu negócio faz marmitas; ainda vou decidir a meta.")
+        recusado = salvar(objetivo="vender 100 marmitas por dia")
+        self.assertFalse(recusado["success"], recusado)
+        self.assertEqual(recusado["recusados"][0]["grupo"], "objetivo")
+        self.assertEqual(Store().negocio()["objetivo"], objetivo)  # a suposição não apaga a decisão anterior
 
     def test_o_que_ela_nao_disse_nao_entra(self):
         diz("Tenho uma loja em Campinas, interior de SP.")
@@ -159,7 +191,8 @@ class NegocioPelaConversaTests(StoreTestCase):
 
     def test_o_modelo_ve_enums_fechados_no_schema(self):
         props = tools.SCHEMAS["negocio_salvar"]["parameters"]["properties"]
-        self.assertEqual(set(props), {"estado", "cidade", "zona", "tipo", "alimentacao"})
+        self.assertEqual(set(props), {"estado", "cidade", "zona", "tipo", "alimentacao", "objetivo"})
+        self.assertEqual(props["objetivo"]["type"], "string")
         self.assertEqual(props["zona"]["enum"], list(negocio.ZONAS))
         self.assertEqual(props["alimentacao"]["items"]["enum"], list(negocio.ALIMENTACAO))
         self.assertEqual(set(tools.SCHEMAS), set(tools.HANDLERS))
@@ -167,22 +200,22 @@ class NegocioPelaConversaTests(StoreTestCase):
 
 
 class PainelDoNegocioTests(StoreTestCase):
-    def test_primeira_mensagem_traz_as_perguntas_do_negocio_e_da_cozinha_numeradas(self):
+    def test_primeira_mensagem_pergunta_um_dado_do_negocio_pelo_chat(self):
         texto = painel.texto_do_painel(primeira_mensagem=True)
-        self.assertIn("preciso conhecer o seu negócio e a sua cozinha. Me conta:", texto)
-        self.assertIn("**Sobre o negócio**\n1. **Onde fica a loja:**", texto)
-        self.assertIn("**Sobre a cozinha**\n4. **Equipamentos e utensílios:**", texto)
-        self.assertIn("marque em **Meu negócio** e **Minha cozinha** (menu)", texto)
+        self.assertIn("Conheça o negócio aos poucos", texto)
+        self.assertIn("Pergunta atual: É um restaurante, restaurante de hotel", texto)
+        self.assertNotIn("Em que cidade e estado fica", texto)  # localização vem depois do tipo e da comida
+        self.assertNotIn("PERGUNTAS PARA FAZER", texto)
+        self.assertNotIn("Tem panela de pressão?", texto)
         self.assertIn("Negócio: A Dona Maria ainda não preencheu o perfil do negócio", texto)
 
     def test_so_pergunta_o_negocio_quando_a_cozinha_ja_esta_completa(self):
         marcar(**COZINHA_COMPLETA)
         texto = painel.texto_do_painel(primeira_mensagem=True)
-        self.assertIn("NEGÓCIO INCOMPLETO E ESTA É A PRIMEIRA MENSAGEM DA CONVERSA", texto)
+        self.assertIn("Etapa: negocio", texto)
         self.assertIn("Cozinha completa: não pergunte de novo", texto)
-        self.assertNotIn("Nenhum prato é aceito antes", texto)  # o negócio não trava o aceite do prato
-        self.assertIn("preciso conhecer o seu negócio. Me conta:", texto)
-        self.assertNotIn("Sobre a cozinha", texto)
+        self.assertNotIn("Nenhum prato é aceito antes", texto)
+        self.assertNotIn("Tem liquidificador?", texto)
 
     def test_o_que_o_modelo_salvou_nao_e_perguntado_de_novo(self):
         diz("Minha loja é em Salvador, Bahia, e faço comida caseira.")
@@ -190,8 +223,36 @@ class PainelDoNegocioTests(StoreTestCase):
         texto = painel.texto_do_painel(primeira_mensagem=True)
         self.assertNotIn("Onde fica a loja", texto)
         self.assertNotIn("Tipo de alimentação que você faz", texto)
-        self.assertIn("1. **Tipo de negócio:**", texto)
+        self.assertIn("É um restaurante, restaurante de hotel", texto)
         self.assertIn("faz: Comida caseira e prato do dia", texto)
+
+    def test_negocio_completo_apresenta_estoque_e_aguarda_sem_pesquisa(self):
+        api.tratar("PUT", "/api/negocio", NEGOCIO_COMPLETO)
+        texto = painel.texto_do_painel(primeira_mensagem=True)
+        estado = api.estado()
+        self.assertEqual(estado["jornada"]["passo"], "estoque")
+        self.assertIn("Etapa: estoque", texto)
+        self.assertIn("Pergunta atual: Está pronta para começar", texto)
+        self.assertNotIn("PESQUISA DE RECEITAS (ela pediu", texto)
+        self.assertEqual(estado["pratos_escolhidos"], [])
+        self.assertFalse(estado["jornada"]["controle"]["estoque_confirmado"])
+
+    def test_objetivo_salvo_pelo_formulario_chega_ao_contexto_da_consultora(self):
+        objetivo = "começar vendendo pizza"
+        status, estado = api.tratar("PATCH", "/api/negocio", {"objetivo": objetivo})
+        self.assertEqual(status, 200)
+        self.assertEqual(estado["negocio"]["objetivo"], objetivo)
+        self.assertIn(f"objetivo informado: {objetivo}", painel.texto_do_painel())
+
+        status, estado = api.tratar("PATCH", "/api/negocio", {
+            **NEGOCIO_COMPLETO, "alimentacao": ["marmita", "pizza", "massas"],
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(estado["negocio"]["objetivo"], objetivo)
+        self.assertEqual(Store().negocio()["alimentacao"], ["marmita", "pizza", "massas"])
+        texto = painel.texto_do_painel()
+        self.assertIn("faz: Marmitas; Pizzas; Massas", texto)
+        self.assertIn(f"objetivo informado: {objetivo}", texto)
 
     def test_o_que_foi_salvo_nao_vira_fala_dela(self):
         mensagem = "Oi\n\n" + painel.texto_do_painel(primeira_mensagem=True)

@@ -46,6 +46,7 @@ services:
           create_host_path: false
     environment:
       LLAMA_KV_SSD_INTERVAL: "${LLAMA_KV_SSD_INTERVAL:-30}"
+      LLAMA_MAX_OUTPUT_TOKENS: "${LLAMA_MAX_OUTPUT_TOKENS:-2048}"
     deploy:
       resources:
         reservations:
@@ -58,9 +59,8 @@ services:
     # contexto é estendido para 65 536 com YaRN (fator 2 sobre 32 768, como a Qwen
     # recomenda). KV cache quantizado (K q8_0, V q4_0) para caber nos 16 GB da
     # RTX 5070 Ti junto com o desktop. Amostragem recomendada pela Qwen.
-    # Teto de tokens por resposta (--n-predict): o Qwen3-8B às vezes não para de gerar (já vimos 7 mil e
-    # 18 mil tokens num turno só) e a placa, dividida com o desktop, chegou a derrubar o servidor com
-    # "CUDA error: the launch timed out". Uma resposta legítima daqui usa menos de 2 mil tokens.
+    # O proxy limita a saída mesmo quando o cliente envia max_tokens maior.
+    # --n-predict define o padrão; o teto efetivo é LLAMA_MAX_OUTPUT_TOKENS.
     command: >
       --model /models/${LLAMA_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}
       --alias ${MODEL_NAME:-qwen3-8b}
@@ -70,8 +70,10 @@ services:
       --flash-attn on
       --cache-type-k q8_0 --cache-type-v ${LLAMA_KV_V_TYPE:-q4_0}
       --parallel 1
-      --n-predict ${LLAMA_N_PREDICT:-4096}
+      --n-predict ${LLAMA_N_PREDICT:-1536}
       --jinja
+      --reasoning ${LLAMA_REASONING_MODE:-off}
+      --chat-template-kwargs '{"enable_thinking":${LLAMA_ENABLE_THINKING:-false}}'
       --reasoning-budget ${LLAMA_REASONING_BUDGET:-0}
       --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0
       --metrics
@@ -189,6 +191,7 @@ services:
       - ./data:/opt/data/sabor_da_maria/entrada:ro
       # Base de conhecimento do Analytics (pratos mais vendidos por zona, cidade, estado, região e país), somente leitura.
       - ./prompts:/prompts:ro
+      - ./docs:/documentos:ro
     environment:
       # Arquivos criados pelo container ficam com o seu usuário do host.
       HERMES_UID: ${HERMES_UID:-1000}
@@ -242,6 +245,7 @@ services:
       - ./database-internals:/database-internals
       - ./data:/data/entrada:ro
       - ./prompts:/prompts:ro
+      - ./docs:/documentos:ro
     environment:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"

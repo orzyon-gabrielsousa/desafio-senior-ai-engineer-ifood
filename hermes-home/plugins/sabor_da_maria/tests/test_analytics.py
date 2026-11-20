@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sabor_da_maria import analytics, api, negocio, painel, tools
+from sabor_da_maria import analytics, api, jornada, negocio, painel, tools
 from sabor_da_maria.store import Store
 from sabor_da_maria.units import norm_text
 
@@ -296,10 +296,19 @@ class FerramentaEApiTests(StoreTestCase):
     def test_painel_leva_evidencia_publicada_do_lugar_apenas_na_pesquisa(self):
         mensagem = "Quais os pratos mais vendidos na minha cidade?"
         sem_local = painel.texto_do_painel(mensagem=mensagem)
-        self.assertIn("Retrospectiva iFood 2025", sem_local)
+        self.assertNotIn("PESQUISA DE RECEITAS", sem_local)
+        self.assertNotIn("Retrospectiva iFood 2025", sem_local)
         self.assertNotIn("Virado à paulista", sem_local)
+        self.assertIn("Etapa: negocio", sem_local)
         self._loja()
+        antes_da_prontidao = painel.texto_do_painel(mensagem=mensagem)
+        self.assertIn("Etapa: estoque", antes_da_prontidao)
+        self.assertNotIn("PESQUISA DE RECEITAS", antes_da_prontidao)
+        self.assertNotIn("Virado à paulista", antes_da_prontidao)
+        jornada.responder(Store(), "confirmar_estoque")
+        jornada.responder(Store(), "ajuda_ia")
         texto = painel.texto_do_painel(mensagem=mensagem)
+        self.assertIn("Retrospectiva iFood 2025", texto)
         self.assertIn("Virado à paulista", texto)
         self.assertNotIn("dados de exemplo", texto)
         self.assertIn("local: Zona Sul, São Paulo/SP", texto)

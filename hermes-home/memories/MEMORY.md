@@ -1,1 +1,1 @@
-A despensa inicial vem da planilha despensa_dona_maria.xlsx. Consulte o estoque e os custos pelas ferramentas. Use o perfil de precificação cadastrado para taxas e impostos.
+A despensa inicial vem da planilha despensa_dona_maria.xlsx. Consulte o estoque e os custos pelas ferramentas. A taxa do desafio é fixa em 10% sobre a venda, sem impostos ou encargos adicionais; o orçamento inicial de complementos é R$ 80,00.

@@ -7,7 +7,7 @@ MODEL_REPO ?= unsloth/Qwen3-8B-GGUF
 MODEL_FILE ?= Qwen3-8B-Q4_K_M.gguf
 Q ?= Liste três itens da despensa com o custo unitário de cada um.
 
-.PHONY: help setup prepare-runtime model modelo-embeddings run up down restart logs status chat ask test validate smoke reset-dados shell up-max down-max playground playground-dev
+.PHONY: help setup prepare-runtime model modelo-embeddings run up down restart logs status chat ask test validate smoke avaliar reset-dados shell up-max down-max playground playground-dev
 
 help: ## mostra esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -84,6 +84,11 @@ ask: ## pergunta única sem TUI: make ask Q="..."
 test: ## testes unitários do plugin e do reset (só stdlib, roda no host)
 	python3 -m unittest discover -s hermes-home/plugins/sabor_da_maria/tests -t hermes-home/plugins -v
 	python3 scripts/test_reset_dados.py -v
+	python3 scripts/test_avaliar_fluxo.py -v
+	python3 -m unittest discover -s inference/llamacpp -p 'test_*.py' -v
+
+avaliar: ## mede pesquisa → aceite → preço no Hermes isolado (stack ligada, não altera dados reais)
+	python3 scripts/avaliar_fluxo.py
 
 validate: ## valida o plugin com o próprio Hermes e lista toolsets/skills ativos
 	$(COMPOSE) exec -T hermes hermes plugins validate /opt/data/plugins/sabor_da_maria

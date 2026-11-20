@@ -27,6 +27,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Optional
 
@@ -117,6 +118,23 @@ def _is_recipe(node: dict[str, Any]) -> bool:
     return kind == "Recipe"
 
 
+def _sem_entidades(valor: Any) -> Any:
+    """O JSON-LD deveria trazer texto puro, mas há site que grava entidades HTML, às vezes escapadas duas vezes
+    ("&amp;oacute;leo"). Sem decodificar, isso chega assim à ficha que a Dona Maria lê."""
+    if isinstance(valor, str):
+        for _ in range(3):
+            limpo = unescape(valor)
+            if limpo == valor:
+                break
+            valor = limpo
+        return valor
+    if isinstance(valor, list):
+        return [_sem_entidades(v) for v in valor]
+    if isinstance(valor, dict):
+        return {chave: _sem_entidades(v) for chave, v in valor.items()}
+    return valor
+
+
 def jsonld_recipes(html: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for block in _LD_RE.findall(html):
@@ -133,7 +151,7 @@ def jsonld_recipes(html: str) -> list[dict[str, Any]]:
             continue
         for node in _walk(data):
             if _is_recipe(node):
-                out.append(node)
+                out.append(_sem_entidades(node))
     return out
 
 
@@ -177,6 +195,16 @@ def _instruction_lines(value: Any) -> list[str]:
     return [re.sub(r"\s+", " ", l) for l in lines if l]
 
 
+def _ingredient_lines(recipe: dict[str, Any]) -> list[str]:
+    from .fonte import sem_titulos_de_ingredientes
+
+    ingredientes = recipe.get("recipeIngredient") or recipe.get("ingredients") or []
+    if isinstance(ingredientes, str):
+        ingredientes = [ingredientes]
+    linhas = [re.sub(r"\s+", " ", _text(i)).strip() for i in ingredientes if _text(i).strip()]
+    return sem_titulos_de_ingredientes(linhas)
+
+
 def recipe_markdown(recipe: dict[str, Any], url: str) -> str:
     nome = _text(recipe.get("name")) or "Receita"
     parts = [f"# {nome}", f"Fonte: {url}"]
@@ -197,12 +225,10 @@ def recipe_markdown(recipe: dict[str, Any], url: str) -> str:
         parts.append(" | ".join(meta))
     if recipe.get("description"):
         parts.append(re.sub(r"\s+", " ", _text(recipe["description"])).strip())
-    ingredientes = recipe.get("recipeIngredient") or recipe.get("ingredients") or []
-    if isinstance(ingredientes, str):
-        ingredientes = [ingredientes]
+    ingredientes = _ingredient_lines(recipe)
     if ingredientes:
         parts.append("## Ingredientes (schema.org/Recipe)")
-        parts.extend(f"- {re.sub(r'\\s+', ' ', _text(i)).strip()}" for i in ingredientes if _text(i).strip())
+        parts.extend(f"- {i}" for i in ingredientes)
     passos = _instruction_lines(recipe.get("recipeInstructions"))
     if passos:
         parts.append("## Modo de preparo")
@@ -291,6 +317,18 @@ def html_to_text(html: str) -> tuple[str, str]:
 
 
 # ----------------------------------------------------------------------------- página -> documento
+def _ficha_completa(recipe: dict[str, Any]) -> bool:
+    """Só dispensa o artigo quando o schema já preserva os dados de preparo."""
+    return bool(
+        _text(recipe.get("name"))
+        and (recipe.get("recipeIngredient") or recipe.get("ingredients"))
+        and _instruction_lines(recipe.get("recipeInstructions"))
+        and _text(recipe.get("recipeYield"))
+        and (iso_minutes(recipe.get("totalTime")) or
+             (iso_minutes(recipe.get("prepTime")) is not None and iso_minutes(recipe.get("cookTime")) is not None))
+    )
+
+
 def extract_page(url: str) -> dict[str, Any]:
     """Um documento no formato que o ``web_extract`` do Hermes espera."""
     try:
@@ -302,15 +340,28 @@ def extract_page(url: str) -> dict[str, Any]:
     title, text = html_to_text(html)
     recipes = jsonld_recipes(html)
     sections: list[str] = []
+    textual = None
     for recipe in recipes[:2]:
         sections.append(recipe_markdown(recipe, final_url))
         if not title:
             title = _text(recipe.get("name"))
-    if recipes:
+    if recipes and not all(_ficha_completa(recipe) for recipe in recipes[:2]):
         sections.append("## Texto da página (resumo)")
         sections.append(text[:6000])
-    else:
-        sections.append(text)
+    elif not recipes:
+        from .fonte import contrato_pagina
+
+        textual = contrato_pagina({"url": final_url, "title": title, "content": text})
+        if textual:
+            sections.append("# " + textual["nome"] + "\nFonte: " + final_url)
+            if textual.get("rendimento_texto"):
+                sections.append("Rendimento informado: " + textual["rendimento_texto"])
+            if textual.get("tempo_preparo_texto"):
+                sections.append("Tempo informado: " + textual["tempo_preparo_texto"])
+            sections.append("## Ingredientes\n" + "\n".join("- " + linha for linha in textual["ingredientes"]))
+            sections.append("## Modo de preparo\n" + textual["modo_preparo"])
+        else:
+            sections.append(text)
     content = "\n\n".join(s for s in sections if s).strip()
     if not content:
         return {"url": final_url, "title": title, "content": "", "error": "página sem texto legível"}
@@ -319,7 +370,13 @@ def extract_page(url: str) -> dict[str, Any]:
         "title": title,
         "content": content,
         "raw_content": content,
-        "metadata": {"sourceURL": final_url, "title": title, "recipe_schema": bool(recipes), "extractor": PROVIDER_NAME},
+        "receitas": ([textual] if not recipes and textual else [{"nome": _text(r.get("name")), "ingredientes": _ingredient_lines(r),
+                      "porcoes": (lambda m: float(m[0].replace(",", ".")) if m else None)(re.findall(r"\d+(?:[.,]\d+)?", _text(r.get("recipeYield")))),
+                      "tempo_preparo_min": iso_minutes(r.get("totalTime")) or
+                          ((iso_minutes(r.get("prepTime")) or 0) + (iso_minutes(r.get("cookTime")) or 0)) or None,
+                      "modo_preparo": "\n".join(_instruction_lines(r.get("recipeInstructions")))} for r in recipes[:2]]),
+        "metadata": {"sourceURL": final_url, "title": title, "recipe_schema": bool(recipes),
+                     "recipe_textual": bool(not recipes and textual), "extractor": PROVIDER_NAME},
     }
 
 

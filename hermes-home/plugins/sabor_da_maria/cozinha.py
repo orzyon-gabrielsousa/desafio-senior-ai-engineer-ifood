@@ -21,6 +21,7 @@ Os números de custo das fichas são de exemplo (custo típico dos ingredientes 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import threading
@@ -123,6 +124,25 @@ def rotina_canonica(chave: str, valor: Any) -> Any:
     return valor
 
 
+def faixa_tempo(valor: Any) -> Optional[dict[str, Any]]:
+    """Limite estrito de disponibilidade, separado do campo numérico existente."""
+    if not isinstance(valor, dict) or valor.get("operador") not in ("menor_que", "maior_que"):
+        return None
+    minutos = valor.get("minutos")
+    if type(minutos) not in (int, float) or not math.isfinite(minutos) or minutos <= 0:
+        return None
+    return {"operador": valor["operador"], "minutos": minutos}
+
+
+def faixa_tempo_texto(valor: Any) -> Optional[str]:
+    faixa = faixa_tempo(valor)
+    if not faixa:
+        return None
+    minutos = faixa["minutos"]
+    medida = f"{minutos / 60:g} horas" if minutos % 60 == 0 else f"{minutos:g} minutos"
+    return ("Menos de " if faixa["operador"] == "menor_que" else "Mais de ") + medida
+
+
 def itens(grupo: str) -> list[Item]:
     return [i for i in CATALOGO if i.grupo == grupo]
 
@@ -185,6 +205,14 @@ def id_por_termos(texto: str, grupos: Optional[Iterable[str]] = None) -> Optiona
     return None
 
 
+def ids_por_termos(texto: str, grupos: Optional[Iterable[str]] = None) -> set[str]:
+    """Todos os itens citados por palavra inteira, para detectar perguntas com mais de um alvo."""
+    palavras = _palavras(texto)
+    permitidos = set(grupos) if grupos else None
+    return {item_id for termo, item_id in _INDICE
+            if (permitidos is None or POR_ID[item_id].grupo in permitidos) and _contem(palavras, termo)}
+
+
 def id_exato(texto: str, grupos: Optional[Iterable[str]] = None) -> Optional[str]:
     """Igualdade com o nome ou um sinônimo do item (é o que as fichas usam: quem escreve a ficha erra alto)."""
     item_id = _EXATOS.get(norm_text(texto))
@@ -195,6 +223,21 @@ def id_exato(texto: str, grupos: Optional[Iterable[str]] = None) -> Optional[str
 
 def habilidade_id(nome: str) -> Optional[str]:
     return id_por_termos(nome, (HABILIDADE,))
+
+
+def chave_equipamento(nome: str) -> str:
+    """Identifica o utensílio por um nome do catálogo ou pela descrição da ficha."""
+    normal = norm_text(nome)
+    return id_por_termos(normal, (EQUIPAMENTO, UTENSILIO)) or normal.replace(" ", "_")
+
+
+def chave_tecnica(nome: str) -> str:
+    """Identifica uma habilidade do catálogo ou preserva o nome próprio da técnica da ficha."""
+    nome = norm_text(nome).replace("_", " ")
+    chave = nome.replace(" ", "_")
+    if chave in POR_ID and POR_ID[chave].grupo == HABILIDADE:
+        return chave
+    return id_exato(nome, (HABILIDADE,)) or chave
 
 
 def termos_de(item_id: str) -> tuple[str, ...]:
@@ -296,7 +339,7 @@ def texto_do_perfil(perfil: dict[str, Any], para_ela: bool = False) -> str:
     ``para_ela``: a frase que a consultora repete para a Dona Maria depois de salvar (só o que está no banco, sem inventar)."""
     salvo, r = da_perfil(perfil), resumo(perfil)
     if not r["respondidos"] and not salvo["rotina"]:
-        return "ainda não marcou nada em Minha cozinha (menu): pergunte o que falta, ou peça para ela preencher a tela."
+        return "ainda não informou equipamentos e habilidades: pergunte no chat somente o que for necessário para o preparo escolhido."
     partes = []
     if r["tem"]:
         partes.append(("Você tem: " if para_ela else "TEM: ") + ", ".join(_com_bocas(salvo, i) for i in r["tem"]))
@@ -422,6 +465,8 @@ def aplicar(perfil: dict[str, Any], limpo: dict[str, Any]) -> dict[str, Any]:
             novo["restricoes"].pop(chave, None)
         else:
             novo["restricoes"][chave] = valor
+            if chave == "tempo_por_cozinhada_min":
+                novo["restricoes"].pop("tempo_por_cozinhada_faixa", None)
     for r in limpo.get("remover", []):
         if r["grupo"] == "observacoes":
             novo["observacoes"] = [o for o in novo["observacoes"] if o != r["chave"]]
@@ -447,6 +492,11 @@ def outros(perfil: dict[str, Any]) -> list[dict[str, str]]:
             saida.append({"grupo": grupo, "chave": chave, "nome": chave.replace("_", " ").capitalize(), "texto": texto[:80]})
     for chave, valor in (perfil.get("restricoes") or {}).items():
         if chave not in ROTINA:
+            if chave == "tempo_por_cozinhada_faixa":
+                texto = faixa_tempo_texto(valor)
+                if texto:
+                    saida.append({"grupo": "restricoes", "chave": chave, "nome": "Tempo por cozinhada", "texto": texto})
+                continue
             saida.append({"grupo": "restricoes", "chave": chave, "nome": chave.replace("_", " ").capitalize(),
                           "texto": ("sim" if valor is True else "não" if valor is False else str(valor))[:80]})
     for obs in perfil.get("observacoes") or []:
@@ -728,9 +778,11 @@ def conferir(prato: Optional[str], ingredientes: Iterable[str], perfil: dict[str
 
     falta: list[dict[str, Any]] = []
     confirmar: list[dict[str, Any]] = []
+    usados: list[str] = []
     for origem, de, para, grupo in exigencias:
         estados = [estado_equipamento(equip, i) for i in grupo]
         if any(e in ("sim", "parcial") for e in estados):
+            usados.append(next(i for i, estado in zip(grupo, estados) if estado in ("sim", "parcial")))
             continue
         entrada = {"origem": origem, "de": de, "para": para, "precisa": _ou(grupo), "ids": list(grupo)}
         (falta if all(e == "nao" for e in estados) else confirmar).append(entrada)
@@ -751,6 +803,7 @@ def conferir(prato: Optional[str], ingredientes: Iterable[str], perfil: dict[str
     else:
         status = "ok" if (ficha or regras_achadas) else "sem_ficha"
     return {"prato": ficha.nome if ficha else (prato or None), "ficha": ficha is not None, "status": status, "falta": falta,
+            "equipamentos_usados": list(dict.fromkeys(usados)),
             "confirmar": confirmar, "habilidades": habilidades, "observacao": ficha.observacao if ficha else "",
             "mensagens": _mensagens(ficha, prato, falta, confirmar, habilidades)}
 

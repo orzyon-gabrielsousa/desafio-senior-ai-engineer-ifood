@@ -32,6 +32,8 @@ export type ChatMessage = {
   tools: ToolTrace[];
   webSearch?: boolean;
   cadastroEnviado?: "negocio" | "cozinha";
+  /** Ela recusou as sugestões mostradas até aqui (nova busca ou prato próprio): a tela não as oferece de novo. */
+  descartaSugestoes?: boolean;
   error?: boolean;
   pending?: boolean;
   startedAt?: number;
@@ -65,10 +67,14 @@ export type ItemCarrinho = {
 
 export type Orcamento = {
   inicial: number;
+  despesas?: number;
+  despesa_despensa?: number;
+  saldo_gerencial?: number;
   comprometido: number;
   gasto_confirmado?: number;
   reservado_cardapio?: number;
   carrinho: number;
+  /** Verba disponível para comprar; use este saldo ao validar uma nova compra. */
   saldo: number;
   estourou: boolean;
 };
@@ -78,6 +84,39 @@ export type CompraPaga = {
   quantidade: number;
   unidade: string;
   preco_total: number;
+};
+
+export type CompraHistorico = {
+  id: number;
+  ingrediente: string;
+  quantidade: number | null;
+  unidade: string | null;
+  valor: number;
+  registrado_em: string;
+  status: "paga" | "comprometida" | "planejada" | "cancelada";
+};
+
+export type HistoricoCompras = {
+  lotes: {
+    id: number;
+    prato_id: number;
+    receita_id: number | null;
+    registrado_em: string | null;
+    ativo: boolean;
+    status?: "preco_pendente" | "no_cardapio" | "encerrado";
+    prato: string;
+    porcoes: number | null;
+    cmv_total: number | null;
+    insumos: {
+      ingrediente: string;
+      quantidade: string | null;
+      custo_uso: number | null;
+      origem: "despensa" | "complemento" | "preparo" | "ficha";
+      derivado?: string;
+    }[];
+    complementos: CompraHistorico[];
+  }[];
+  avulsas: CompraHistorico[];
 };
 
 /** Um ingrediente de um prato, com o seu valor. */
@@ -115,6 +154,8 @@ export type Negocio = {
   estado: string;
   cidade: string;
   zona: string;
+  /** Objetivo informado pela pessoa; opcional para perfis já cadastrados. */
+  objetivo?: string;
 };
 
 // ---- Minha cozinha: o que ela tem, o que sabe fazer e a rotina (o mesmo perfil que a consultora lê e grava).
@@ -169,6 +210,38 @@ export type PratosDaCozinha = {
   categorias: CategoriaDePratos[];
 };
 
+export type IngredienteFaltante = {
+  ingrediente: string;
+  item_despensa: string | null;
+  quantidade_receita: string;
+  quantidade_faltante_base: number | null;
+  unidade_base: string | null;
+  motivo: string;
+  estado: "faltando" | "resolvido" | "omitido_na_adaptacao";
+  observacao: string;
+  registrado_em: string;
+};
+
+export type PlanoDivulgacao = {
+  criado_em: string;
+  prato: { id: number; nome: string; preco_venda: number; lucro_por_porcao: number };
+  volume: { porcoes: number; dias: number; origem: "historico" | "informado" | "lote_hipotetico" };
+  campanha: {
+    objetivo: string;
+    canal: string;
+    estrategia: string;
+    titulo: string;
+    descricao: string;
+    legenda: string;
+    investimento: number;
+    lucro_previsto_por_porcao?: number;
+    teto_para_margem: number;
+    margem_minima: number | null;
+    origem_margem: "informada" | "cenario_escolhido" | "sem_meta";
+    tarefas: string[];
+  };
+};
+
 export type PratoEscolhido = {
   id: number;
   nome: string;
@@ -184,17 +257,36 @@ export type PratoEscolhido = {
   veredito?: string | null;
   bloqueios?: { tipo: string; detalhe: string }[];
   pendencias?: string[];
+  analise_preco_salva?: boolean;
+  ingredientes_faltantes?: IngredienteFaltante[];
+  ingredientes_da_ficha?: IngredienteDaFicha[];
+  medidas_de_uso_estimadas?: { ingrediente: string; quantidade: number; unidade: string; base: string }[];
+};
+
+export type IngredienteDaFicha = {
+  ingrediente: string;
+  quantidade: string | null;
+  estado: "disponivel" | "faltando" | "a_conferir";
+  item_despensa: string | null;
+  uso_despensa: string | null;
+  falta: string | null;
+  derivado: boolean;
+  omitido: boolean;
+  substitui: string | null;
 };
 
 /** Aviso da conferência com a cozinha: não dá (falta algo que ela disse não ter), atenção (habilidade), confirmar (falta responder). */
 export type NivelAviso = "nao_da" | "atencao" | "confirmar";
 export type AlertaCozinha = { prato: string | null; item_id: number | null; nivel: NivelAviso; mensagens: string[] };
 
+export type MedidaPendente = { rotulo: string; cotacao: string };
+
 export type Estado = {
   geracao_dados?: string | null;
   perfil_precificacao?: PerfilPrecificacao;
   orcamento: Orcamento;
   compras_pagas?: CompraPaga[];
+  historico_compras?: HistoricoCompras;
   carrinho: ItemCarrinho[];
   alertas: AlertaCozinha[];
   salvos: Salvos;
@@ -203,8 +295,40 @@ export type Estado = {
   cozinha: Cozinha;
   cadastro?: { negocio_pendente: boolean; cozinha_pendente: boolean; cozinha_campos: string[] };
   pratos_escolhidos?: PratoEscolhido[];
+  vendas_resumo?: ResumoVendas;
+  jornada?: {
+    etapa: "negocio" | "estoque" | "ajuda" | "proprio" | "pausa" | "pesquisa" | "escolha" | "pendencias" | "aceite" | "preco" | "cardapio" | "revisao" | "divulgacao";
+    passo?: PassoJornada;
+    concluidas?: Record<PassoJornada, boolean>;
+    titulo: string;
+    descricao: string;
+    acao: string;
+    mensagem: string;
+    pendencias: (string | { tipo: string; detalhe: string })[];
+    pergunta?: { texto: string; opcoes: { rotulo: string; resposta?: string; mensagem: string; acao?: AcaoJornada }[]; medida?: MedidaPendente } | null;
+    pergunta_esgotada?: boolean;
+    plano_divulgacao?: PlanoDivulgacao;
+    controle?: {
+      pausado: boolean;
+      estoque_confirmado: boolean;
+      ajuda: "" | "ia" | "proprio";
+      proprio_pendente?: boolean;
+      ultimo_prato_ao_escolher?: number;
+      rascunhos_adiados?: number[];
+      divulgacao: "" | "interesse" | "dispensada";
+    };
+    estoque?: { nome: string; quantidade: number; unidade: string; custo_unitario: number | null; custo_total: number | null; disponivel: number; reservado: number }[];
+    prato_id?: number;
+    /** Fichas desta escolha; as demais continuam salvas em Minha cozinha. */
+    pratos_ativos?: number[];
+    prato_nome?: string;
+    pratos?: { id: number; nome: string }[];
+  };
   opcoes: { tipos: Opcao[]; alimentacao: Opcao[]; paises: Opcao[]; estados: OpcaoEstado[]; zonas: Opcao[]; cozinha: OpcoesCozinha };
 };
+
+export type PassoJornada = "negocio" | "estoque" | "ajuda" | "montagem" | "divulgacao";
+export type AcaoJornada = "confirmar_estoque" | "pausar" | "retomar" | "ajuda_ia" | "prato_proprio" | "interesse_divulgacao" | "dispensar_divulgacao";
 
 export type NovoItem = {
   nome: string;
@@ -234,9 +358,58 @@ export type CarrinhoAcoes = {
   salvoToCart: (id: number) => Acao;
 };
 
-// ---- Analytics: taxas da loja e projeções dos pratos.
+// ---- Analytics: regras do desafio e projeções dos pratos.
 
-export type PlanoPrecificacao = "basico" | "entrega" | "personalizado" | "desafio";
+export type PeriodoVendas = "dia" | "semana" | "mes";
+export type ResumoPeriodoVendas = {
+  inicio: string;
+  fim: string;
+  quantidade: number;
+  registros: number;
+  faturamento_bruto: number;
+  taxa_plataforma: number;
+  recebe_liquido: number;
+  cmv_total: number;
+  lucro_estimado: number;
+};
+export type ResumoVendas = {
+  fuso: string;
+  referencia: string;
+  possui_registros: boolean;
+  periodos: Record<PeriodoVendas, ResumoPeriodoVendas>;
+};
+export type VendaReal = Omit<ResumoPeriodoVendas, "inicio" | "fim" | "registros"> & {
+  id: number;
+  operacao: string;
+  prato_id: number;
+  prato: string;
+  preco_unitario: number;
+  cmv_unitario: number;
+  vendido_em: string;
+  registrado_em: string;
+  status: "confirmada" | "estornada";
+  estornado_em: string | null;
+};
+export type RespostaVendas = {
+  periodo: PeriodoVendas;
+  inicio: string;
+  fim: string;
+  fuso: string;
+  resumo: ResumoPeriodoVendas;
+  vendas: VendaReal[];
+  limite: number;
+  total_registros: number;
+  truncado: boolean;
+};
+export type NovaVenda = {
+  prato_id: number;
+  quantidade: number;
+  preco_unitario?: number;
+  vendido_em?: string;
+  operacao: string;
+};
+
+export type PlanoPrecificacao = "desafio";
 
 export type PerfilPrecificacao = {
   plano: PlanoPrecificacao;
@@ -252,7 +425,7 @@ export type RespostaAnalytics = {
   pendentes: { prato_id: number; prato: string; motivo: string }[];
   perfil_precificacao: PerfilPrecificacao;
   planos: Record<PlanoPrecificacao, { rotulo: string; comissao: number; pagamento: number }>;
-  referencias: { consultadas_em: string; ifood: string; simples: string };
+  referencias: { documento: string; secao: string };
 };
 
 export type ResultadoPreco = {

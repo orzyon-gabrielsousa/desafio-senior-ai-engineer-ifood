@@ -24,10 +24,27 @@ model:
   streaming: true
 
 agent:
-  # A consultoria é conversacional: 40 iterações de tool por turno é folga suficiente
-  # e evita loops longos num modelo de 8B.
-  max_turns: 40
+  # Teto de segurança para tentativas de ferramenta; a resposta pronta do plugin
+  # encerra os turnos concluídos antes de chegar a este limite.
+  max_turns: 12
   tool_use_enforcement: "auto"
+
+# O histórico da consulta é formado principalmente por resultados de ferramentas.
+# Reduza resultados antigos antes de depender de um resumo gerado no limite da janela.
+compression:
+  threshold_tokens: 42000
+  proactive_prune_tokens: 30000
+  proactive_prune_min_result_chars: 5000
+  protect_last_n: 12
+  min_tail_user_messages: 3
+
+# A mesma GPU atende a conversa e a recuperação de contexto. Revisões automáticas
+# de memória/skills podem gerar milhares de tokens depois de um turno e atrasar
+# a próxima resposta. Estado, histórico, embeddings e a ferramenta memory seguem
+# ativos; a revisão manual /refine continua disponível no Hermes.
+auxiliary:
+  background_review:
+    enabled: false
 
 # ---------------------------------------------------------------- web (busca + extração)
 # Busca: SearXNG local (container "searxng"), via SEARXNG_URL no ambiente.

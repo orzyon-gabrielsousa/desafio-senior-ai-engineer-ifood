@@ -49,6 +49,7 @@ TITULOS = {
     "cardapio_registrar": "Registrou no cardápio",
     "cardapio_remover": "Tirou do cardápio",
     "cardapio_consultar": "Consultou o cardápio",
+    "divulgacao_planejar": "Simulou a margem com divulgação",
     "carrinho_consultar": "Abriu o carrinho",
     "carrinho_adicionar": "Colocou no carrinho",
     "carrinho_adicionar_prato": "Abriu o prato no carrinho",
@@ -56,6 +57,8 @@ TITULOS = {
     "carrinho_montar_da_receita": "Montou o carrinho da receita",
     "salvos_salvar": "Salvou em Meus pratos",
     "analytics_analises_consultar": "Consultou as análises salvas",
+    "vendas_registrar": "Registrou uma venda realizada",
+    "vendas_consultar": "Consultou as vendas realizadas",
     "clarify": "Perguntou a ela",
     "memory": "Guardou na memória",
     "skill_view": "Abriu o playbook",
@@ -257,7 +260,7 @@ def _conferir(args: dict, r: dict) -> Descricao:
     partes = [f"tem {tem}", f"falta {falta}", f"comprar {costing.brl(compras)}"]
     if "cabe_no_orcamento" in orc:
         partes.append("cabe no orçamento" if orc["cabe_no_orcamento"] else "NÃO cabe no orçamento")
-    if resumo.get("cmv_previa", {}).get("total"):
+    if (resumo.get("cmv_previa") or {}).get("total"):
         partes.append(f"custo da receita {costing.brl(float(resumo['cmv_previa']['total']))}")
     linhas = [f"{i.get('ingrediente')}: {i.get('memoria_de_calculo') or ('falta ' + str(i.get('falta')))}" for i in r.get("ingredientes") or [] if isinstance(i, dict)]
     veredito = str(r.get("veredito") or "").replace("_", " ")
@@ -313,6 +316,20 @@ def _analises_salvas(args: dict, r: dict) -> Descricao:
     return TITULOS["analytics_analises_consultar"], _plural(len(pratos), "análise salva", "análises salvas"), _lista(pratos)
 
 
+def _venda_realizada(args: dict, r: dict) -> Descricao:
+    venda = r.get("venda") or {}
+    resumo = (f"{venda.get('quantidade', 0)} porções de {venda.get('prato', 'prato')} · "
+              f"faturamento {costing.brl(venda.get('faturamento_bruto') or 0)}")
+    return TITULOS["vendas_registrar"], resumo, _lista([r.get("diga_a_dona_maria")])
+
+
+def _vendas_realizadas(args: dict, r: dict) -> Descricao:
+    total = r.get("resumo") or {}
+    return (TITULOS["vendas_consultar"],
+            f"{total.get('quantidade', 0)} porções · faturamento {costing.brl(total.get('faturamento_bruto') or 0)}",
+            _lista([r.get("diga_a_dona_maria")]))
+
+
 DESCRITORES: dict[str, Callable[[dict, dict], Descricao]] = {
     "web_search": _web_search,
     "web_extract": _web_extract,
@@ -336,6 +353,8 @@ DESCRITORES: dict[str, Callable[[dict, dict], Descricao]] = {
     "carrinho_remover": _carrinho(TITULOS["carrinho_remover"]),
     "carrinho_montar_da_receita": _carrinho(TITULOS["carrinho_montar_da_receita"]),
     "analytics_analises_consultar": _analises_salvas,
+    "vendas_registrar": _venda_realizada,
+    "vendas_consultar": _vendas_realizadas,
 }
 
 

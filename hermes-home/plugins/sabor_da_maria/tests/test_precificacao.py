@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from sabor_da_maria import api, falas, precificacao, tools
+from sabor_da_maria import api, costing, falas, montagem, painel, precificacao, tools
 from sabor_da_maria.store import Store
 
 from ._base import FALA_COZINHA, SESSAO, StoreTestCase, diz
@@ -27,6 +27,7 @@ class AceiteDaReceitaTests(unittest.TestCase):
     def test_sim_fica_ligado_a_uma_pergunta_de_aceite_de_receita(self):
         pergunta = f"O custo é R$ 3,49 por porção. Você aceita preparar o prato #1 {self.nome} nessa versão?"
         self.assertIsNotNone(self.ler("Sim, está certo, quero seguir com a receita do jeito que combinamos.", pergunta))
+        self.assertIsNotNone(self.ler("Sim, não vejo impedimento.", pergunta))
         self.assertIsNotNone(self.ler("Sim", f"O prato #1 é {self.nome}. Aceita preparar nessa versão?"))
         self.assertIsNone(self.ler("Sim", "Você tem frigideira para fazer o prato #1?"))
         self.assertIsNone(self.ler("Sim", f"Você confirma o preço de R$ 4,00 do prato {self.nome}?"))
@@ -36,7 +37,8 @@ class AceiteDaReceitaTests(unittest.TestCase):
 
     def test_recusa_negacao_aceite_condicional_e_referencias_ambiguas(self):
         pergunta = f"Você aceita preparar o prato #1 {self.nome} nessa versão?"
-        for fala in ("Não aceito o prato #1.", "Sim, mas não aceito #1.", "Aceito #1 se tiver tomate.",
+        for fala in ("Não aceito o prato #1.", "Sim, mas não aceito #1.", "Sim, não prepare.", "Sim, não faça nada.",
+                     "Aceito #1 se tiver tomate.",
                      "Confirmo o prato #1, mas troque o feijão.", "Confirmo #2", "Confirmo #1 ou #2.",
                      "Confirmo que tenho frigideira para o prato #1.", "Confirmo o prato #1?",
                      "Confirmo só os ingredientes do prato #1.", "Confirmo o preço do prato #1."):
@@ -47,6 +49,18 @@ class AceiteDaReceitaTests(unittest.TestCase):
         anterior = falas.Fala(f"Aceito {self.nome}.")
         self.assertIsNone(self.ler("Qual é o saldo?", anteriores=[anterior]))
         self.assertIsNone(self.ler("Não, prefiro revisar.", anteriores=[anterior]))
+
+    def test_confirmacao_com_impedimento_ou_revisao_nao_aceita_ficha_antiga(self):
+        pergunta = f"Você aceita preparar o prato #1 {self.nome} nessa versão?"
+        for fala in ("Sim, aceito o prato #1, mas não tenho forno.",
+                     "Sim, aceito o prato #1, só que acabou o gás.",
+                     "Sim, aceito o prato #1 e troque o frango.",
+                     "Sim, aceito o prato #1. Não tenho forno.",
+                     "Sim, aceito o prato #1. Acabou o gás."):
+            with self.subTest(fala=fala):
+                self.assertIsNone(self.ler(fala, pergunta))
+        self.assertIsNotNone(self.ler("Sim, não vejo impedimento.", pergunta))
+        self.assertIsNotNone(self.ler("Pode preparar o prato #1 nessa versão.", pergunta))
 
 
 class AnalisesDePrecoTests(StoreTestCase):
@@ -62,7 +76,7 @@ class AnalisesDePrecoTests(StoreTestCase):
         self.assertTrue(perfil["completo"], perfil)
 
     def prato(self, quantidade=500, *, selecionado=None):
-        receita = call("receita_conferir_ingredientes", nome="Frango em cubos", porcoes=3,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, nome="Frango em cubos", porcoes=3,
                        ingredientes=[{"nome": "peito de frango", "quantidade": quantidade, "unidade": "g"}],
                        prato_id=selecionado)
         cmv = call("prato_calcular_cmv", receita_id=receita["receita_id"])
@@ -81,6 +95,119 @@ class AnalisesDePrecoTests(StoreTestCase):
         self.assertEqual(dados["analises"], call("analytics_analises_consultar")["analises"])
         return dados["analises"]
 
+    def test_aceite_separa_estoque_e_complementos_antes_da_escolha_do_preco(self):
+        store = Store()
+        prato, = store.selecionar_pratos([{"nome": "Frango em cubos"}])
+        ficha = call("receita_conferir_ingredientes", prato_id=prato["id"], porcoes=3, tempo_preparo_min=30,
+                     ingredientes=[{"nome": "Peito de frango", "quantidade": 500, "unidade": "g"},
+                                   {"nome": "Cogumelo shiitake", "quantidade": 50, "unidade": "g",
+                                    "quantidade_compra": 100, "unidade_compra": "g", "preco_compra_estimado": 12}])
+        self.assertEqual(ficha["veredito"], "viavel", ficha)
+        ident = prato["id"]
+        self.assertTrue(call("prato_calcular_cmv", prato_id=ident)["success"])
+        self.assertEqual(store.carrinho_itens(), [])
+        self.assertEqual(store.reservas_ativas(), [])
+
+        diz(f"Aceito preparar o prato #{ident} nessa versão.")
+        for _ in range(2):
+            self.assertTrue(self.sugerir(ident)["analise_salva"])
+            self.assertIsNone(store.obter_prato(ident)["preco_venda"])
+            self.assertEqual(len(store.carrinho_itens()), 2)
+            self.assertEqual(store.carrinho_resumo()["saldo"], 68)
+            self.assertAlmostEqual(store.obter("Peito de frango")["disponivel_base"], 1.5)
+        self.assertEqual(store.orcamento()["gasto_confirmado"], 0)
+
+        diz(f"Escolho vender o prato #{ident} por R$ 12,00 por porção. Registre no cardápio.")
+        publicado = call("cardapio_registrar", prato_id=ident, preco_escolhido=12)
+        self.assertTrue(publicado["success"], publicado)
+        self.assertEqual(publicado["linhas_do_carrinho_que_viraram_compras"], 2)
+        self.assertEqual(store.carrinho_itens(), [])
+        self.assertEqual(store.carrinho_resumo()["saldo"], 68)
+        self.assertAlmostEqual(store.obter("Peito de frango")["disponivel_base"], 1.5)
+
+    def test_preco_curto_registra_prato_que_estava_em_analise(self):
+        store = Store()
+        prato, = store.selecionar_pratos([{"nome": "Frango em cubos"}])
+        prato_id = self.prato(selecionado=prato["id"])
+        pergunta = ("O prato Frango em cubos ainda não tem preço definido. Escolha o preço para registrar no cardápio. "
+                    "Qual preço você prefere?")
+        historico = [{"role": "assistant", "content": pergunta}]
+        diz(f"Confirmo o prato #{prato_id} nessa versão.")
+        self.assertTrue(self.sugerir(prato_id)["analise_salva"])
+
+        recomendacao = painel.ao_iniciar_turno(session_id=SESSAO, turn_id="recomendacao", conversation_history=historico,
+                                             user_message="faz pra mim isso, para eu ter lucro")["context"]
+        self.assertIn("Sugiro", recomendacao)
+        texto = montagem.completar_resposta("Vou simular novos preços", SESSAO, "recomendacao")
+        self.assertIn("10%", texto)
+        self.assertIsNone(store.obter_prato(prato_id)["preco_venda"])
+
+        frase = "R$ 8,50"
+        falas.ao_iniciar_turno(session_id=SESSAO, conversation_history=historico, user_message=frase)
+        resposta = painel.ao_iniciar_turno(session_id=SESSAO, turn_id="registro", conversation_history=historico,
+                                          user_message=frase)["context"]
+        self.assertIn("Registro concluído no cardápio", resposta)
+        self.assertIn("R$ 8,50 por porção", montagem.completar_resposta("Qual preço você prefere?", SESSAO, "registro"))
+        self.assertEqual(store.obter_prato(prato_id)["preco_venda"], 8.50)
+
+        reservas = store.reservas_ativas()
+        self.assertEqual(len(reservas), 1)
+        self.assertTrue(call("cardapio_registrar", prato_id=prato_id, preco_escolhido=8.50)["ja_registrado"])
+        self.assertEqual(store.reservas_ativas(), reservas)
+
+        falas.ao_iniciar_turno(session_id=SESSAO, conversation_history=historico, user_message="8 reais")
+        self.assertFalse(call("cardapio_registrar", prato_id=prato_id, preco_escolhido=8)["success"])
+        self.assertEqual(store.obter_prato(prato_id)["preco_venda"], 8.50)
+
+    def test_escolha_natural_com_ponto_registra_apos_pergunta_canonica_sem_repetir_id(self):
+        store = Store()
+        escolhido, = store.selecionar_pratos([{"nome": "Frango em cubos"}])
+        prato_id = self.prato(selecionado=escolhido["id"])
+        diz(f"Confirmo o prato #{prato_id} nessa versão.")
+        analise = self.sugerir(prato_id)
+        self.assertTrue(analise["analise_salva"])
+        pergunta = tools._mostrar_analise(SESSAO, store.obter_prato(prato_id), analise)
+        historico = [{"role": "assistant", "content": pergunta}]
+        frase = "Escolho vender por R$ 6.50 por porção. Pode registrar."
+        falas.ao_iniciar_turno(session_id=SESSAO, conversation_history=historico, user_message=frase)
+        resposta = tools.avancar_cardapio_no_turno(store, SESSAO, falas.da_sessao(SESSAO))
+        self.assertIn("Registro concluído no cardápio", resposta)
+        self.assertEqual(store.obter_prato(prato_id)["preco_venda"], 6.5)
+        self.assertEqual(store.obter_prato(prato_id)["status"], "aceito")
+        reservas = store.reservas_ativas()
+        self.assertEqual(len(reservas), 1)
+        registro = call("cardapio_registrar", prato_id=prato_id, preco_escolhido=6.5)
+        self.assertTrue(registro["success"], registro)
+        self.assertTrue(registro["ja_registrado"])
+        self.assertEqual(store.reservas_ativas(), reservas)
+        self.assertEqual(store.orcamento()["saldo"], 80)
+        outra_sessao = "preco-sem-pergunta-desta-conversa"
+        falas.ao_iniciar_turno(session_id=outra_sessao, user_message="Escolho vender por R$ 9.50 por porção. Pode registrar.")
+        self.assertIsNone(tools.avancar_cardapio_no_turno(store, outra_sessao, falas.da_sessao(outra_sessao)))
+        recusado = json.loads(tools.HANDLERS["cardapio_registrar"]({"prato_id": prato_id, "preco_escolhido": 9.5}, session_id=outra_sessao))
+        self.assertFalse(recusado["success"])
+        self.assertEqual(store.obter_prato(prato_id)["preco_venda"], 6.5)
+
+    def test_recalculo_no_mesmo_turno_atualiza_texto_para_ultima_analise_salva(self):
+        prato = self.prato()
+        diz(f"Confirmo o prato #{prato} nessa versão.")
+        montagem.iniciar_turno(SESSAO, "recalculo-de-cenarios")
+        anterior = self.sugerir(prato)
+        self.assertTrue(anterior["analise_salva"], anterior)
+        atual = self.sugerir(prato, margens=[0.55, 0.70], nomes=["Revisado", "Mais fôlego"])
+        self.assertTrue(atual["analise_salva"], atual)
+        self.assertNotEqual([c["preco_sugerido"] for c in atual["cenarios"]],
+                            [c["preco_sugerido"] for c in anterior["cenarios"]])
+        salva, = Store().analises_preco()
+        self.assertEqual(salva["dados"]["cenarios"], atual["cenarios"])
+        texto = montagem.completar_resposta("Preço inventado: R$ 99,00", SESSAO, "recalculo-de-cenarios")
+        for cenario in atual["cenarios"]:
+            self.assertIn(f"**{cenario['nome']}: {costing.brl(cenario['preco_sugerido'])}**", texto)
+        for cenario in anterior["cenarios"]:
+            self.assertNotIn(f"**{cenario['nome']}: {costing.brl(cenario['preco_sugerido'])}**", texto)
+        self.assertNotIn("R$ 99,00", texto)
+        self.assertIn("Qual preço por porção", texto)
+
     def test_aceite_da_receita_salva_analise_e_registro_reflete_decisao(self):
         prato = self.prato()
         avulsa = call("preco_sugerir", prato_id=prato)
@@ -97,9 +224,9 @@ class AnalisesDePrecoTests(StoreTestCase):
         self.assertTrue(sugerida["analise_salva"], sugerida)
         analise, = self.analises()
         self.assertEqual((analise["status"], analise["preco_escolhido"]), ("proposta", None))
-        self.assertEqual((analise["cmv_total"], analise["cmv_por_porcao"], analise["preco_minimo"]), (7.0, 2.33, 2.75))
-        self.assertEqual((analise["taxa_plataforma"], analise["cenario_recomendado"]), (0.152, 1))
-        self.assertEqual(analise["cenarios"][0]["porcoes_para_meta"], 188)
+        self.assertEqual((analise["cmv_total"], analise["cmv_por_porcao"], analise["preco_minimo"]), (7.0, 2.33, 2.60))
+        self.assertEqual((analise["taxa_plataforma"], analise["cenario_recomendado"]), (0.10, 1))
+        self.assertEqual(analise["cenarios"][0]["porcoes_para_meta"], 147)
 
         registro = call("cardapio_registrar", prato_id=prato, preco_escolhido=4)
         self.assertTrue(registro["success"], registro)
@@ -118,7 +245,7 @@ class AnalisesDePrecoTests(StoreTestCase):
         dados = api.tratar("GET", "/api/analytics/analises")[1]
         previa, = dados["previas"]
         self.assertEqual((previa["status"], previa["cmv_total"]), ("previa", 7))
-        self.assertIsNone(dados["perfil_precificacao"]["imposto"])
+        self.assertEqual(dados["perfil_precificacao"]["imposto"], 0)
 
         diz("Confirmo o frango em cubos.")
         self.assertTrue(self.sugerir(prato)["analise_salva"])
@@ -126,9 +253,9 @@ class AnalisesDePrecoTests(StoreTestCase):
         status, dados = api.tratar("PUT", "/api/analytics/taxas", {"plano": "entrega", "imposto": 0.04})
         self.assertEqual(status, 200)
         taxa_nova, = dados["analises"]
-        self.assertGreater(taxa_nova["preco_minimo"], anterior["preco_minimo"])
+        self.assertEqual(taxa_nova["preco_minimo"], anterior["preco_minimo"])
         self.assertEqual(Store().perfil_precificacao(), dados["perfil_precificacao"])
-        self.assertEqual(api.tratar("PUT", "/api/analytics/taxas", {"plano": "entrega", "imposto": 0.80})[0], 400)
+        self.assertEqual(api.tratar("PUT", "/api/analytics/taxas", {"plano": "entrega", "imposto": 0.80})[1]["perfil_precificacao"], dados["perfil_precificacao"])
 
         store.registrar_compra("Peito de frango", 1, "kg", 30)
         atual, = self.analises()
@@ -150,13 +277,35 @@ class AnalisesDePrecoTests(StoreTestCase):
         self.assertEqual((depois["status"], depois["preco_escolhido"]), ("registrado", 10))
         self.assertEqual(store.reservas_do_prato(prato), reservas)
 
+    def test_perfil_real_salvo_no_banco_legado_e_normalizado_sem_mudar_decisao_da_pessoa(self):
+        store = Store()
+        legado = {"plano": "entrega", "comissao": 0.23, "pagamento": 0.032,
+                  "pagamento_online": True, "imposto": 0.04}
+        with store.connect() as conn:
+            store._config_set(conn, "perfil_precificacao", json.dumps(legado))
+        dados = api.tratar("GET", "/api/analytics/analises")[1]
+        self.assertEqual(dados["perfil_precificacao"], {"plano": "desafio", "comissao": 0.10,
+                         "pagamento": 0.0, "pagamento_online": False, "imposto": 0.0})
+        self.assertEqual(list(dados["planos"]), ["desafio"])
+        prato = self.prato()
+        diz("Confirmo o frango em cubos.")
+        self.assertTrue(self.sugerir(prato)["analise_salva"])
+        antiga = store.analises_preco()[0]["dados"]
+        antiga.update(taxa_plataforma=0.262, taxa_impostos=0.04, preco_minimo=99)
+        store.salvar_analise_preco(prato, antiga)
+        analise, = self.analises()
+        self.assertEqual(analise["taxa_plataforma"], 0.10)
+        self.assertEqual(analise["taxa_impostos"], 0.0)
+        self.assertEqual(analise["preco_minimo"], 2.60)
+        self.assertIsNone(store.obter_prato(prato)["preco_venda"])
+
     def test_revisao_do_mesmo_rascunho_recalcula_os_ingredientes(self):
         escolhido, = Store().selecionar_pratos([{"nome": "Frango em cubos"}])
         prato = self.prato(selecionado=escolhido["id"])
         diz("Confirmo o frango em cubos.")
         self.assertTrue(self.sugerir(prato)["analise_salva"])
 
-        receita = call("receita_conferir_ingredientes", prato_id=prato, nome="Frango em cubos", porcoes=4,
+        receita = call("receita_conferir_ingredientes", tempo_preparo_min=30, prato_id=prato, nome="Frango em cubos", porcoes=4,
                        ingredientes=[{"nome": "peito de frango", "quantidade": 750, "unidade": "g"},
                                      {"nome": "sal", "quantidade": 5, "unidade": "g"}])
         self.assertTrue(receita["success"], receita)

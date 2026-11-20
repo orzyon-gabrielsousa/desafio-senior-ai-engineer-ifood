@@ -21,7 +21,7 @@ HISTORICO = (
 )
 INTERNALS = ("memoria", "kv", "conversas.sqlite3", "conversas.sqlite3-wal", "conversas.sqlite3-shm", "conversas.sqlite3-journal")
 MEMORIAS_INICIAIS = {
-    "MEMORY.md": "A despensa inicial vem da planilha despensa_dona_maria.xlsx. Consulte o estoque e os custos pelas ferramentas. Use o perfil de precificação cadastrado para taxas e impostos.\n",
+    "MEMORY.md": "A despensa inicial vem da planilha despensa_dona_maria.xlsx. Consulte o estoque e os custos pelas ferramentas. A taxa do desafio é fixa em 10% sobre a venda, sem impostos ou encargos adicionais; o orçamento inicial de complementos é R$ 80,00.\n",
     "USER.md": "Dona Maria está montando o delivery Sabor da Maria e fala português do Brasil. Ajude a cadastrar o negócio e a cozinha pelo chat.\n",
 }
 

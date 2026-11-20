@@ -17,6 +17,7 @@ Duas responsabilidades:
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -83,7 +84,7 @@ _PLURALS = {
     "postas": "posta", "pacotes": "pacote", "caixas": "caixa", "pecas": "peca", "pequenas": "pequena",
     "medias": "media", "grandes": "grande", "pequenos": "pequena", "medios": "media", "cubos": "cubo",
     "pacotinhos": "pacotinho", "sache": "sache", "saches": "sache", "garrafas": "garrafa", "potes": "pote",
-    "punhados": "punhado", "mililitros": "mililitro",
+    "punhados": "punhado", "mililitros": "mililitro", "americanos": "americano", "peitos": "peito",
 }
 _VOLUME_ML: dict[str, float] = {
     "ml": 1, "mililitro": 1, "l": 1000, "litro": 1000, "lt": 1000,
@@ -100,13 +101,16 @@ _MASS_G: dict[str, float] = {
 }
 _COUNT_UNITS = {
     "un", "unidade", "unid", "u", "pc", "peca", "dente", "fatia", "folha", "maco", "ramo", "talo", "cabeca",
-    "ovo", "pedaco", "file", "bife", "posta", "pequena", "media", "grande", "cubo", "lata", "pacote", "caixa",
+    "ovo", "pedaco", "file", "peito", "bife", "posta", "pequena", "media", "grande", "cubo", "lata", "pacote", "caixa",
     "pacotinho", "sache", "garrafa", "pote", "tablete",
 }
 
 # Densidade aproximada (g/ml) por palavra-chave do item da despensa. Primeira
 # correspondência vence, então as chaves mais específicas vêm antes.
 _DENSIDADE_G_ML: list[tuple[str, float]] = [
+    ("molho de tomate", 1.00), ("pure de tomate", 1.00), ("passata", 1.00), ("pure de batata", 1.00),
+    ("arroz branco cozido", 0.70), ("arroz cozido", 0.70), ("feijao cozido", 0.75),
+    ("frango desfiado", 0.55),
     ("farinha de trigo", 0.55), ("farinha de mandioca", 0.60), ("fuba", 0.60), ("polenta", 0.60),
     ("leite ninho", 0.50), ("leite em po", 0.50), ("leite", 1.03),
     ("queijo parmesao", 0.40), ("parmesao", 0.40), ("ralado", 0.40), ("mussarela", 0.50), ("queijo", 0.45),
@@ -131,7 +135,7 @@ _PESO_UNIDADE_G: list[tuple[str, dict[str, float]]] = [
     ("couve", {"folha": 25, "maco": 300}),
     ("salsinha", {"maco": 60, "ramo": 5, "talo": 5, "punhado": 10}),
     ("cheiro verde", {"maco": 60, "ramo": 5, "talo": 5}),
-    ("frango", {"file": 150, "un": 300, "peca": 300, "pedaco": 100}),
+    ("frango", {"file": 150, "peito": 300, "un": 300, "peca": 300, "pedaco": 100}),
     ("alcatra", {"bife": 150, "un": 150, "pedaco": 100}),
     ("acem", {"pedaco": 100, "cubo": 25}),
     ("carne moida", {"pacote": 500}),
@@ -161,6 +165,11 @@ def _lookup(table: list[tuple[str, object]], item_key: str):
 
 def densidade(item_key: str) -> tuple[float, bool]:
     """(g/ml, conhecida?). Sem correspondência usa 1,0 e sinaliza chute."""
+    nome = norm_text(item_key)
+    if re.search(r"\bfeijao(?: carioca| carioquinha| preto)? cozido\b", nome):
+        return 0.75, True
+    if "frango" in nome and "desfiado" in nome:
+        return 0.55, True
     _, value = _lookup(_DENSIDADE_G_ML, item_key)
     return (float(value), True) if value is not None else (1.0, False)
 
@@ -233,10 +242,40 @@ def to_base(quantity: float, unit: str, item_key: str, base: str, *, conteudo_un
                               f"{q:g} {u} ÷ {conteudo_un_base:g} por unidade ≈ {amount_base / conteudo_un_base:.3f} un")
         if "ovo" in norm_text(item_key):
             return Conversion(q * _MASS_G.get(u, 0) / 50.0, base, True, f"{q:g} {u} ≈ {q * _MASS_G.get(u, 0) / 50.0:.1f} ovos (≈ 50 g cada)")
-        return Conversion(None, base, True,
-                          f"o item é contado por unidade e não sei o peso/volume de 1 unidade; "
-                          f"registre com despensa_atualizar(conteudo_por_unidade)")
+        return Conversion(None, base, True, "o item é contado por unidade e falta saber o peso/volume de 1 unidade")
     return Conversion(None, base, True, f"unidade '{unit}' não reconhecida para item contado por unidade")
+
+
+def materia_prima_do_preparo(quantity: float, unit: str, derivado: str, materia_prima: str,
+                             base: str, rendimento: float, *, conteudo_un_base: Optional[float] = None) -> Conversion:
+    """Converte a medida do alimento pronto para o consumo estimado da matéria-prima."""
+    if not math.isfinite(rendimento) or rendimento <= 0:
+        return Conversion(None, base, True, "o rendimento do preparo precisa ser positivo e finito")
+    medida = normalize_measure(unit)
+    # Um peito é o corte contado antes de cozinhar, mesmo quando a fonte
+    # manda usá-lo já cozido e desfiado. Aplicar o rendimento para trás a
+    # um peso de peito cru inflaria a quantidade retirada da despensa.
+    if medida in {"peito", "un", "unidade"} and norm_text(derivado).startswith("peito de frango "):
+        bruto = to_base(quantity, "peito", materia_prima, base)
+        if bruto.qty_base is not None:
+            return Conversion(bruto.qty_base, base, True,
+                              f"Preparo caseiro: use a contagem de peitos de frango antes do cozimento. {bruto.note}. Confira o peso no lote piloto.")
+    if medida in _COUNT_UNITS:
+        return Conversion(None, base, True, f"informe o peso/volume de {derivado} em g/kg ou ml/L; a unidade do produto pronto não é a da matéria-prima")
+    pronto = to_base(quantity, unit, derivado, "kg")
+    if pronto.qty_base is None:
+        return Conversion(None, base, True, pronto.note)
+    bruto = to_base(pronto.qty_base * 1000 / rendimento, "g", materia_prima, base,
+                    conteudo_un_base=conteudo_un_base)
+    if bruto.qty_base is None:
+        return bruto
+    nota = (f"Preparo caseiro: {quantity:g} {unit} de {derivado} usam aproximadamente "
+            f"{format_base(bruto.qty_base, base)} de {materia_prima}; "
+            f"rendimento local estimado de {rendimento:g} kg prontos por kg de matéria-prima. "
+            "Confira o rendimento no lote piloto; não é uma medida publicada na fonte.")
+    if pronto.estimate:
+        nota += " " + pronto.note
+    return Conversion(bruto.qty_base, base, True, nota)
 
 
 def format_base(qty: float, base: str) -> str:

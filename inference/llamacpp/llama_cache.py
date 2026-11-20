@@ -27,6 +27,60 @@ GENERATION_ROUTES = {
 POST_ROUTES = GENERATION_ROUTES | {"/tokenize", "/detokenize", "/apply-template", "/v1/messages/count_tokens"}
 FORWARDED_HEADERS = {"content-type", "content-length", "content-encoding", "cache-control", "retry-after"}
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
+TOKEN_LIMIT_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens", "n_predict")
+
+
+def generation_request(body: bytes | None, path: str, *, maximum: int, default: int) -> bytes:
+    """Apply a server-owned output budget without increasing a client's smaller limit.
+
+    ``--n-predict`` is a default, not a hard cap: API clients can override it.
+    Keep native and OpenAI aliases in agreement so one cannot bypass another.
+    This does not change prompts, tool schemas, stop markers or streaming.
+    """
+    try:
+        request = json.loads(body or b"{}")
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("Corpo de geração precisa ser um objeto JSON") from exc
+    if not isinstance(request, dict):
+        raise ValueError("Corpo de geração precisa ser um objeto JSON")
+    requested = []
+    for field in TOKEN_LIMIT_FIELDS:
+        value = request.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field} precisa ser um número inteiro")
+        if value >= 0:
+            requested.append(value)
+    budget = min(maximum, *requested) if requested else min(maximum, default)
+    if path in {"/responses", "/v1/responses"}:
+        primary = "max_output_tokens"
+    elif path == "/completion":
+        primary = "n_predict"
+    else:
+        primary = "max_completion_tokens" if "max_completion_tokens" in request else "max_tokens"
+    for field in TOKEN_LIMIT_FIELDS:
+        if field in request:
+            request[field] = budget
+    request[primary] = budget
+    return json.dumps(request, ensure_ascii=False).encode()
+
+
+def generation_limits(args: list[str]) -> tuple[int, int]:
+    try:
+        maximum = int(os.environ.get("LLAMA_MAX_OUTPUT_TOKENS", "2048"))
+        if maximum <= 0:
+            raise ValueError
+    except ValueError:
+        LOGGER.warning("LLAMA_MAX_OUTPUT_TOKENS inválido; usando 2048")
+        maximum = 2048
+    try:
+        default = int(args[args.index("--n-predict") + 1])
+        if default < 0:
+            default = maximum
+    except (ValueError, IndexError):
+        default = 1536
+    return maximum, min(maximum, default)
 
 
 def snapshot_name(args: list[str]) -> str:
@@ -157,8 +211,10 @@ class SlotCache:
 
 
 class InferenceProxy(ThreadingHTTPServer):
-    def __init__(self, cache: SlotCache):
+    def __init__(self, cache: SlotCache, *, max_output_tokens: int = 2048, default_output_tokens: int = 1536):
         self.cache = cache
+        self.max_output_tokens = max_output_tokens
+        self.default_output_tokens = min(max_output_tokens, default_output_tokens)
         super().__init__(("0.0.0.0", 8000), RequestHandler)
 
 
@@ -184,7 +240,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         target = urlsplit(self.path)
         cache = self.server.cache
         if self.command == "GET" and target.path == "/kv-cache" and not target.netloc:
-            self.send_json(200, cache.status())
+            self.send_json(200, {**cache.status(), "generation_limits": {
+                "default_output_tokens": self.server.default_output_tokens,
+                "max_output_tokens": self.server.max_output_tokens,
+            }})
             return
         allowed = GET_ROUTES if self.command == "GET" else POST_ROUTES
         if target.netloc or target.path not in allowed:
@@ -204,6 +263,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(size) if size else None
         if target.path not in GENERATION_ROUTES:
             self.forward(body)
+            return
+        try:
+            body = generation_request(body, target.path, maximum=self.server.max_output_tokens,
+                                      default=self.server.default_output_tokens)
+        except ValueError as exc:
+            self.send_json(400, {"error": {"type": "invalid_request_error", "message": str(exc)}})
             return
         with cache.lock:
             # Um único slot. Se a geração falhar ou pedir para desativar o cache, não grave seu conteúdo.
@@ -259,6 +324,8 @@ def main(args: list[str]) -> int:
         LOGGER.warning("LLAMA_KV_SSD_INTERVAL inválido; usando 30 segundos")
         interval = 30
     private_args = [*args, "--host", "127.0.0.1", "--port", str(UPSTREAM_PORT)]
+    maximum, default = generation_limits(args)
+    LOGGER.info("Limite de saída: padrão %d, teto %d tokens por geração", default, maximum)
     cache = SlotCache(directory, private_args, interval)
     if cache.snapshot is not None:
         private_args += ["--slot-save-path", str(directory)]
@@ -268,7 +335,7 @@ def main(args: list[str]) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    with InferenceProxy(cache) as proxy, subprocess.Popen([LLAMA_SERVER, *private_args]) as llama:
+    with InferenceProxy(cache, max_output_tokens=maximum, default_output_tokens=default) as proxy, subprocess.Popen([LLAMA_SERVER, *private_args]) as llama:
         http_server = threading.Thread(target=proxy.serve_forever, daemon=True)
         worker = threading.Thread(target=cache.run, daemon=True)
         http_server.start()

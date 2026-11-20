@@ -19,6 +19,7 @@ provides_tools:
   - cardapio_registrar
   - cardapio_remover
   - cardapio_consultar
+  - divulgacao_planejar
   - carrinho_consultar
   - carrinho_adicionar
   - carrinho_adicionar_prato
@@ -26,6 +27,8 @@ provides_tools:
   - carrinho_montar_da_receita
   - salvos_salvar
   - analytics_analises_consultar
+  - vendas_registrar
+  - vendas_consultar
 provides_hooks:
   # pre_llm_call: guarda o que a Dona Maria disse (falas.py, trava de evidência do perfil) e leva o carrinho,
   # o saldo e o perfil do negócio ao turno, com o roteiro da pesquisa de receitas quando ela pede (painel.py, pesquisa.py).
@@ -33,8 +36,12 @@ provides_hooks:
   # transform_tool_result: o próximo passo no resultado de uma busca de receita e da leitura da página (pesquisa.py).
   - pre_llm_call
   - post_llm_call
+  - pre_tool_call
   - post_tool_call
   - transform_tool_result
+  - transform_llm_output
+provides_middleware:
+  - llm_execution
 provides_web_providers:
   - receitas-local
 optional_env:

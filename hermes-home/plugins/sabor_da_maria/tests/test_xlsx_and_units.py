@@ -68,7 +68,8 @@ class RecipeConversionTests(unittest.TestCase):
         self.assertAlmostEqual(to_base(100, "g", "Ovos", "un").qty_base, 2.0)
         sem_conteudo = to_base(200, "g", "Cobertura de chocolate", "un")
         self.assertIsNone(sem_conteudo.qty_base)
-        self.assertIn("despensa_atualizar", sem_conteudo.note)
+        self.assertIn("peso/volume de 1 unidade", sem_conteudo.note)
+        self.assertNotIn("despensa_atualizar", sem_conteudo.note)
         com_conteudo = to_base(200, "g", "Cobertura de chocolate", "un", conteudo_un_base=1.0)
         self.assertAlmostEqual(com_conteudo.qty_base, 0.2)
 

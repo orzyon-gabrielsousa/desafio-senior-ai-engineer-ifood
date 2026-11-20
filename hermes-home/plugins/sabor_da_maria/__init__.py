@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 
-from . import atividade, falas, memoria, painel, pesquisa, tools
+from . import atividade, encerramento, falas, memoria, montagem, painel, pesquisa, tools
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +39,21 @@ def register(ctx) -> None:
             description=schema["description"].split(".")[0],
             emoji="🍲",
         )
+    # O middleware público preserva o histórico e a entrega feitos pelo Hermes.
+    try:
+        ctx.register_middleware("llm_execution", encerramento.executar)
+    except Exception as exc:  # versões anteriores seguem o fluxo normal do modelo
+        logger.warning("sabor_da_maria: middleware de encerramento não registrado: %s", exc)
     # Hooks: (1) guardam o que a Dona Maria disse, para a trava de evidência do perfil (falas.py);
     # (2) levam o carrinho, o saldo e o perfil do negócio a todo turno, com o roteiro da pesquisa de receitas quando ela pede (painel.py);
     # (3) anotam o que cada ferramenta fez, para a tela mostrar o passo a passo (atividade.py);
     # (4) põem o próximo passo no resultado de uma busca de receita e da leitura da página (pesquisa.py).
     for hook, callback in (("pre_llm_call", falas.ao_iniciar_turno), ("pre_llm_call", painel.ao_iniciar_turno),
                            ("pre_llm_call", memoria.ao_iniciar_turno), ("post_llm_call", memoria.apos_turno),
+                           ("pre_tool_call", pesquisa.ajustar_consulta),
                            ("post_tool_call", falas.apos_tool), ("post_tool_call", atividade.apos_tool),
-                           ("transform_tool_result", pesquisa.depois_da_ferramenta)):
+                           ("transform_tool_result", pesquisa.depois_da_ferramenta),
+                           ("transform_llm_output", montagem.completar_resposta)):
         try:
             ctx.register_hook(hook, callback)
         except Exception as exc:  # noqa: BLE001 - sem o hook, perfil_cozinha_salvar recusa por não ter a fala dela

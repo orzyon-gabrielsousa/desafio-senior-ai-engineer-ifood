@@ -22,7 +22,9 @@ class CarrinhoStoreTests(StoreTestCase):
     def test_saldo_acompanha_o_carrinho(self):
         store = Store()
         self.assertEqual(store.carrinho_resumo(), {"inicial": 80.0, "comprometido": 0.0, "gasto_confirmado": 0.0,
-                                                  "reservado_cardapio": 0.0, "carrinho": 0.0, "saldo": 80.0, "estourou": False})
+                                                  "reservado_cardapio": 0.0, "carrinho": 0.0, "saldo": 80.0, "estourou": False,
+                                                  "despesa_despensa": 0.0, "despesa_complementos": 0.0,
+                                                  "despesas": 0.0, "saldo_gerencial": 80.0})
         item = store.carrinho_adicionar("Couve", 12, 1, "maço")
         self.assertEqual((item["nome"], item["preco_total"], item["estimado"]), ("Couve", 12.0, False))
         resumo = store.carrinho_resumo()
@@ -150,7 +152,7 @@ def _perfil_completo():
 
 
 def _receita_com_compra(nome="Frango cremoso"):
-    return call("receita_conferir_ingredientes", nome=nome, porcoes=4, ingredientes=[
+    return call("receita_conferir_ingredientes", tempo_preparo_min=30, nome=nome, porcoes=4, ingredientes=[
         {"nome": "peito de frango", "quantidade": 1, "unidade": "kg"},
         {"nome": "creme de leite", "quantidade": 200, "unidade": "g", "item_despensa": "",
          "preco_compra_estimado": 3.5, "quantidade_compra": 200, "unidade_compra": "g"}],
@@ -162,7 +164,7 @@ class CarrinhoToolsTests(StoreTestCase):
         out = call("carrinho_adicionar", nome="couve", preco_total="12,00", quantidade=1, unidade="maço", preco_estimado=True)
         self.assertTrue(out["success"], out)
         self.assertEqual(out["resumo"]["saldo"], 68.0)
-        self.assertEqual(out["diga_a_dona_maria"], "orçamento R$ 80,00 · no carrinho R$ 12,00 · saldo R$ 68,00")
+        self.assertEqual(out["diga_a_dona_maria"], "orçamento R$ 80,00 · despesas R$ 0,00 · saldo R$ 80,00 · no carrinho R$ 12,00 · disponível para novas compras R$ 68,00")
         self.assertTrue(out["adicionado"]["estimado"])
         consulta = call("carrinho_consultar")
         self.assertEqual([i["nome"] for i in consulta["carrinho"]], ["couve"])
@@ -189,7 +191,7 @@ class CarrinhoToolsTests(StoreTestCase):
         out = call("carrinho_montar_da_receita", receita_id=receita["receita_id"])
         self.assertFalse(out["success"])
         self.assertTrue(out["bloqueado"])
-        self.assertEqual({b["tipo"] for b in out["bloqueios"]}, {"perfil_pendente", "equipamento_nao_informado", "tecnica_nao_informada"})
+        self.assertEqual({b["tipo"] for b in out["bloqueios"]}, {"tempo_disponivel_pendente", "gas_a_confirmar", "energia_a_confirmar", "refrigeracao_a_confirmar", "equipamento_nao_informado", "tecnica_nao_informada"})
         self.assertEqual(call("carrinho_consultar")["carrinho"], [])
 
     def test_receita_viavel_monta_o_carrinho_e_o_aceite_converte_em_compra(self):
@@ -218,7 +220,8 @@ class CarrinhoToolsTests(StoreTestCase):
         depois = call("carrinho_consultar")
         self.assertEqual([i["nome"] for i in depois["carrinho"]], ["couve"])  # só a linha da receita saiu
         self.assertEqual(depois["resumo"]["saldo"], 64.5)  # 80 − 3,5 comprometidos − 12 de couve
-        self.assertIn("saldo R$ 64,50", registro["diga_a_dona_maria"])
+        self.assertIn("despesas R$ 17,50 · saldo R$ 62,50", registro["diga_a_dona_maria"])
+        self.assertIn("disponível para novas compras R$ 64,50", registro["diga_a_dona_maria"])
 
     def test_receita_que_nao_cabe_no_saldo_e_recusada(self):
         _perfil_completo()
@@ -231,6 +234,18 @@ class CarrinhoToolsTests(StoreTestCase):
 
 
 class ApiTests(StoreTestCase):
+    def test_estado_distingue_custo_de_analise_salva_sem_escolher_preco(self):
+        store = Store()
+        prato_id = store.salvar_prato("Frango em cubos", None, 4, 8, 2, {})
+        resumo, = api.estado(store)["pratos_escolhidos"]
+        self.assertEqual(resumo["status"], "cmv_calculado")
+        self.assertFalse(resumo["analise_preco_salva"])
+        store.salvar_analise_preco(prato_id, {"cenarios": []})
+        resumo, = api.estado(store)["pratos_escolhidos"]
+        self.assertTrue(resumo["analise_preco_salva"])
+        self.assertIsNone(resumo["preco_venda"])
+        self.assertEqual(store.reservas_ativas(), [])
+
     def test_estado_inicial(self):
         status, dados = api.tratar("GET", "/api/estado")
         self.assertEqual(status, 200)

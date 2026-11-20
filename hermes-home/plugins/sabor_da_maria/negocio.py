@@ -4,12 +4,12 @@
 negócio. Os **pratos** em si (o que a cozinha dela faz, com quais equipamentos, utensílios e habilidades) moram em Minha cozinha (``cozinha.py``), não aqui.
 
 Dois caminhos gravam o mesmo registro (``config`` do SQLite): a Dona Maria, pela tela Meu negócio, e a consultora, pela conversa (``negocio_salvar``, que só
-grava o que ela disse, como a trava de evidência do perfil da cozinha). As opções são fechadas (a tela mostra seleção, não texto livre), então o que chega ao
-banco sempre bate com o catálogo abaixo. Só a cidade é texto livre.
+grava o que ela disse, como a trava de evidência do perfil da cozinha). As opções fechadas usam o catálogo abaixo. A cidade e o objetivo são texto livre.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .units import norm_text
@@ -65,6 +65,9 @@ TERMOS_ALIMENTACAO: dict[str, tuple[str, ...]] = {
     "saudavel": ("saudavel", "fit", "salada", "saladas", "vegetariana", "vegana", "light"),
 }
 
+_CATEGORIA_POR_TERMO = {termo: categoria for categoria, termos in TERMOS_ALIMENTACAO.items() for termo in termos}
+_MENCAO_ALIMENTACAO = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(_CATEGORIA_POR_TERMO, key=len, reverse=True))) + r")\b")
+
 # UF -> (nome, região). A região sai do estado: ninguém precisa informar duas vezes.
 ESTADOS: dict[str, tuple[str, str]] = {
     "AC": ("Acre", "Norte"), "AL": ("Alagoas", "Nordeste"), "AP": ("Amapá", "Norte"), "AM": ("Amazonas", "Norte"),
@@ -85,7 +88,7 @@ ZONAS: dict[str, str] = {
     "oeste": "Zona Oeste",
 }
 
-CAMPOS = ("tipo", "alimentacao", "estado", "cidade", "zona")
+CAMPOS = ("tipo", "alimentacao", "estado", "cidade", "zona", "objetivo")
 
 
 def opcoes() -> dict[str, list[dict[str, str]]]:
@@ -130,7 +133,8 @@ def normalizar(dados: Any) -> dict[str, Any]:
     zona = str(dados.get("zona") or "").strip()
     if zona and zona not in ZONAS:
         raise ValueError("escolha a zona na lista")
-    return {"tipo": tipo, "alimentacao": alimentacao, "pais": PAIS, "estado": estado, "cidade": _texto(dados.get("cidade"), 60), "zona": zona}
+    return {"tipo": tipo, "alimentacao": alimentacao, "pais": PAIS, "estado": estado, "cidade": _texto(dados.get("cidade"), 60),
+            "zona": zona, "objetivo": _texto(dados.get("objetivo"), 240)}
 
 
 # ----------------------------------------------------------------------------- do que ela diz para o catálogo
@@ -159,6 +163,30 @@ def resolver_alimentacao(texto: Any) -> Optional[str]:
         if alvo in {_chave(t) for t in termos}:
             return chave
     return None
+
+
+def categorias_mencionadas(texto: Any) -> list[str]:
+    """IDs do catálogo citados como opções, na ordem em que aparecem no texto."""
+    if not isinstance(texto, str):
+        return []
+    normal = norm_text(texto)
+    categorias: list[str] = []
+    ultimo_fim = 0
+    for mencao in _MENCAO_ALIMENTACAO.finditer(normal):
+        termo = mencao[0]
+        anterior = normal[ultimo_fim:mencao.start()].strip()
+        trecho = re.split(r"[,.;:/]|\b(?:e|ou)\b", anterior)[-1].strip()
+        if re.search(r"\b(?:nao|sem|em vez de|no lugar de|exceto)(?: (?:quero|pretendo|vou|vendo|vender|servir|fazer))*$", trecho):
+            continue
+        # Uma pizza de camarão ou com massa integral continua sendo pizza.
+        if categorias and (re.match(r"^(?:(?:caseir[ao]s?|saudave(?:l|is)|fit|light) )*(?:de|da|do|com|rechead[ao]s? com)\b", trecho)
+                           or not anterior and termo in {"caseira", "doce", "doces", "saudavel", "fit", "light"}):
+            continue
+        categoria = _CATEGORIA_POR_TERMO[termo]
+        if categoria not in categorias:
+            categorias.append(categoria)
+        ultimo_fim = mencao.end()
+    return categorias
 
 
 def resolver_zona(texto: Any) -> Optional[str]:
@@ -209,13 +237,15 @@ def _alimentacao(negocio: dict[str, Any]) -> list[str]:
 def descrever(negocio: Optional[dict[str, Any]]) -> str:
     """Frase curta para a consultora usar nas sugestões."""
     n = negocio or {}
-    if not (n.get("tipo") or n.get("alimentacao") or n.get("estado") or n.get("cidade")):
+    if not any(n.get(campo) for campo in ("tipo", "alimentacao", "estado", "cidade", "objetivo")):
         return "A Dona Maria ainda não preencheu o perfil do negócio (menu: Meu negócio) nem contou na conversa."
     partes = [TIPOS.get(n.get("tipo", ""), "tipo de negócio não informado")]
     comida = _alimentacao(n)
     partes.append("faz: " + "; ".join(comida) if comida else "tipo de alimentação não informado")
     local = descrever_local(n)
     partes.append("local: " + local if local else "local da loja não informado (Meu negócio)")
+    if n.get("objetivo"):
+        partes.append("objetivo informado: " + n["objetivo"])
     return ". ".join(partes) + "."
 
 
@@ -239,15 +269,15 @@ def pendencias(negocio: Optional[dict[str, Any]]) -> list[dict[str, str]]:
     """O que a consultora ainda precisa saber do negócio (a zona é pedida junto com o lugar, mas não trava: nem toda cidade tem)."""
     n = negocio or {}
     saida: list[dict[str, str]] = []
-    if not (n.get("estado") and n.get("cidade")):
-        saida.append({"grupo": "negocio", "campo": "local", "titulo": "Onde fica a loja",
-                      "pergunta": "Em que país, estado e cidade fica a sua loja? E em que zona da cidade (centro, norte, sul, leste ou oeste), se a cidade tiver?"})
     if not n.get("tipo"):
         saida.append({"grupo": "negocio", "campo": "tipo", "titulo": "Tipo de negócio",
                       "pergunta": "É um " + ", ".join(v.lower() for k, v in TIPOS.items() if k != "outro") + " ou outro tipo de negócio?"})
     if not n.get("alimentacao"):
         saida.append({"grupo": "negocio", "campo": "alimentacao", "titulo": "Tipo de alimentação que você faz",
                       "pergunta": "Que tipo de comida você faz (pode ser mais de um): " + ", ".join(v[0].lower() for v in ALIMENTACAO.values()) + "?"})
+    if not (n.get("estado") and n.get("cidade")):
+        saida.append({"grupo": "negocio", "campo": "local", "titulo": "Onde fica a loja",
+                      "pergunta": "Em que cidade e estado fica o seu negócio? A zona da cidade é opcional."})
     return saida
 
 

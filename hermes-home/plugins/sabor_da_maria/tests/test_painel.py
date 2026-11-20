@@ -3,7 +3,7 @@
 import logging
 import os
 
-from sabor_da_maria import falas, painel
+from sabor_da_maria import falas, jornada, montagem, painel, pesquisa
 from sabor_da_maria.store import Store
 
 from ._base import StoreTestCase
@@ -13,9 +13,11 @@ class PainelTests(StoreTestCase):
     def test_painel_vazio(self):
         texto = painel.texto_do_painel()
         self.assertTrue(texto.startswith(falas.MARCA_PAINEL))
-        self.assertIn("Saldo: orçamento R$ 80,00 · no carrinho R$ 0,00 · saldo R$ 80,00.", texto)
+        self.assertIn("Saldo: orçamento R$ 80,00 · despesas R$ 0,00 · saldo R$ 80,00 · no carrinho R$ 0,00 · disponível para novas compras R$ 80,00.", texto)
         self.assertIn("Carrinho: vazio.", texto)
         self.assertIn("ainda não preencheu o perfil do negócio", texto)
+        # Idioma fixo vai em todo turno: o 8B deriva para outro idioma sem o lembrete.
+        self.assertIn("Responda sempre em português do Brasil", texto)
         self.assertTrue(texto.rstrip().endswith("[fim do painel]"))
 
     def test_painel_com_itens_e_negocio(self):
@@ -24,7 +26,7 @@ class PainelTests(StoreTestCase):
         store.carrinho_adicionar("Alho", 3)
         store.negocio_salvar({"tipo": "restaurante_hotel", "alimentacao": ["caseira", "doces"], "estado": "SP", "cidade": "São Paulo", "zona": "sul"})
         texto = painel.texto_do_painel(store)
-        self.assertIn("no carrinho R$ 15,00 · saldo R$ 65,00", texto)
+        self.assertIn("no carrinho R$ 15,00 · disponível para novas compras R$ 65,00", texto)
         self.assertIn("Couve (1 maço, R$ 12,00, preço estimado) | Alho (1, R$ 3,00)", texto)
         self.assertIn("Restaurante de hotel", texto)
         self.assertIn("faz: Comida caseira e prato do dia; Doces e sobremesas", texto)
@@ -38,7 +40,8 @@ class PainelTests(StoreTestCase):
         store.aceitar_prato(prato, 20.0, [{"ingrediente": "creme de leite", "quantidade": 200, "unidade": "g", "preco_estimado": 3.5}])
         texto = painel.texto_do_painel(Store())
         self.assertIn("reservado para compras de pratos R$ 3,50", texto)
-        self.assertIn("saldo R$ 64,50", texto)
+        self.assertIn("despesas R$ 3,50 · saldo R$ 76,50", texto)
+        self.assertIn("disponível para novas compras R$ 64,50", texto)
 
     def test_lista_longa_e_cortada(self):
         store = Store()
@@ -53,21 +56,28 @@ class PainelTests(StoreTestCase):
         self.assertEqual(list(resposta), ["context"])
         self.assertIn("saldo R$ 80,00", resposta["context"])
 
-    def test_chat_usa_convite_clicavel_e_avanca_apos_salvar(self):
+    def test_chat_usa_convite_clicavel_e_apresenta_estoque_apos_salvar(self):
         resposta = painel.ao_iniciar_turno(
-            is_first_turn=True, session_id="s",
+            is_first_turn=True, session_id="s", turn_id="convite-negocio",
             user_message="Oi!\n\n[painel da tela: cadastro guiado no chat]",
         )["context"]
         self.assertIn("[[cadastro:negocio]]", resposta)
         self.assertNotIn("PERGUNTAS PARA FAZER", resposta)
         Store().negocio_salvar({"tipo": "restaurante_hotel", "alimentacao": ["caseira"], "estado": "SP", "cidade": "São Paulo"})
+        store = Store()
+        antes = store.pratos(), store.reservas_ativas(), store.orcamento()
         resposta = painel.ao_iniciar_turno(
-            session_id="s",
+            session_id="s", turn_id="negocio-salvo",
             user_message="Enviei meu cadastro do negócio pelo chat.\n\n[painel da tela: cadastro guiado no chat; salvou negocio]",
         )["context"]
         self.assertIn("O formulário do negócio já gravou", resposta)
-        self.assertIn("[[cadastro:cozinha]]", resposta)
+        self.assertIn("esse formulário é opcional", resposta.lower())
+        self.assertNotIn("MONTAR UM PRATO PARA O CARDÁPIO", resposta)
         self.assertNotIn("[[cadastro:negocio]]", resposta)
+        self.assertEqual(jornada.resumo(store)["etapa"], "estoque")
+        self.assertFalse(pesquisa.pesquisando("s"))
+        self.assertIn("ingredientes já comprados", montagem.resposta_preparada("s", "negocio-salvo"))
+        self.assertEqual((store.pratos(), store.reservas_ativas(), store.orcamento()), antes)
 
     def test_hook_nunca_derruba_o_turno(self):
         log = logging.getLogger("sabor_da_maria.painel")

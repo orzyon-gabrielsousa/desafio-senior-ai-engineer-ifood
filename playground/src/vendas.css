@@ -1,0 +1,47 @@
+.vendas-analytics { margin-bottom: 22px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+.vendas-cabecalho { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.vendas-cabecalho h3 { margin: 0; font-size: 20px; }
+.vendas-cabecalho p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.vendas-cabecalho .mini-btn { flex-shrink: 0; }
+.vendas-periodos { display: flex; gap: 5px; margin-top: 18px; padding: 4px; border-radius: 12px; background: var(--bg); }
+.vendas-periodo { flex: 1; padding: 9px 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-weight: 700; cursor: pointer; }
+.vendas-periodo.ativo { color: var(--red); background: var(--surface); box-shadow: 0 1px 5px #00000013; }
+.vendas-periodo:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.vendas-fuso { margin-block: 8px 12px; }
+.vendas-intervalo { font-size: 13px; font-weight: 700; color: var(--muted); margin: 14px 0 10px; }
+.vendas-totais { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0 0 14px; }
+.vendas-totais > div { padding: 12px; border-radius: 12px; background: var(--bg); min-width: 0; }
+.vendas-totais dt { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.vendas-totais dd { margin: 7px 0 0; font-size: 19px; font-weight: 800; overflow-wrap: anywhere; }
+.vendas-totais .vendas-total-principal { background: #fff2f3; }
+.vendas-total-principal dd { color: var(--red); }
+.vendas-sucesso { margin: 12px 0; padding: 12px; border-radius: 12px; color: #216144; background: #eef8f1; font-size: 14px; }
+.vendas-vazio { margin: 16px 0 0; padding: 16px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); text-align: center; font-size: 14px; }
+.vendas-historico { margin: 18px 0 0; border-top: 1px solid var(--line); }
+.vendas-historico > summary { padding: 12px 0; font-size: 14px; font-weight: 800; cursor: pointer; }
+.vendas-historico > summary span { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.vendas-lista { list-style: none; padding: 0; margin: 0; }
+.venda-linha { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+.venda-descricao { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.venda-descricao strong { font-size: 14px; overflow-wrap: anywhere; }
+.venda-descricao span, .venda-descricao time { color: var(--muted); font-size: 12px; }
+.venda-valor { display: flex; align-items: flex-end; flex-direction: column; gap: 10px; flex-shrink: 0; }
+.venda-valor strong { font-size: 15px; }
+.venda-valor .link-btn { font-size: 12px; }
+.venda-linha.estornada .venda-valor > strong { text-decoration: line-through; color: var(--muted); }
+.venda-status { color: #93631b; font-size: 12px; }
+.venda-form { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.venda-form h4 { margin: 0 0 14px; }
+.venda-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 12px; }
+.venda-form-par { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.venda-form-acoes { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+@media (max-width: 560px) {
+  .vendas-analytics { padding: 13px; }
+  .vendas-cabecalho { flex-direction: column; gap: 10px; }
+  .vendas-totais { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .vendas-totais > div { padding: 10px; }
+  .vendas-totais dd { font-size: 17px; }
+  .vendas-periodo { padding-inline: 7px; font-size: 13px; }
+  .venda-form { padding: 12px; }
+  .venda-form-par { grid-template-columns: 1fr; }
+}
