@@ -276,3 +276,11 @@ Os casos de pendência começam com fichas sintéticas já salvas e verificam se
 
 - Spike do perfil MAX na RTX 50 e comparação com o llama.cpp no mesmo roteiro.
 - Bônus em Mojo: matcher de ingredientes exposto ao Python via `PythonModuleBuilder`.
+
+## Contribuidores
+
+- [Gabriel Sousa](https://github.com/orzyon-gabrielsousa) — autor e responsável pelo projeto.
+- Claude — assistência de IA no desenvolvimento.
+- Cursor Agent — assistência de IA no desenvolvimento.
+- [Qoder](https://qoder.com) — assistência de IA no desenvolvimento.
+- [Codex (OpenAI)](https://github.com/codex) — correções na montagem de pratos com o estoque disponível e testes de regressão.
