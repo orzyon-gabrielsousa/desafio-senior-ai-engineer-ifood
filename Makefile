@@ -6,17 +6,21 @@ PLAYGROUND_HOST_PORT ?= 3000
 MODEL_REPO ?= unsloth/Qwen3-8B-GGUF
 MODEL_FILE ?= Qwen3-8B-Q4_K_M.gguf
 Q ?= Liste três itens da despensa com o custo unitário de cada um.
+MAKE_EXECUTABLE := $(MAKE)
+export MODEL_REPO MODEL_FILE
 
-.PHONY: help setup prepare-runtime model modelo-embeddings run up down restart logs status chat ask test validate smoke avaliar reset-dados shell up-max down-max playground playground-dev
+.PHONY: help install setup prepare-runtime check-runtime model modelo-embeddings run up down restart logs status chat ask test validate smoke avaliar reset-dados shell up-max down-max playground playground-dev
 
 help: ## mostra esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
+install: prepare-runtime ## verifica o Docker e a GPU, baixa modelos e imagens e prepara o banco
+	@bash scripts/preparar_execucao.sh instalar "$(MAKE_EXECUTABLE)" $(COMPOSE)
+
 setup: ## cria .env a partir do exemplo e as pastas de runtime
-	@test -f .env || cp .env.example .env
+	@test -f .env || sed "s/^HERMES_UID=.*/HERMES_UID=$$(id -u)/; s/^HERMES_GID=.*/HERMES_GID=$$(id -g)/" .env.example > .env
 	@mkdir -p models hermes-home/sabor_da_maria
-	@sed -i "s/^HERMES_UID=.*/HERMES_UID=$$(id -u)/; s/^HERMES_GID=.*/HERMES_GID=$$(id -g)/" .env
-	@echo "ok: .env pronto (HERMES_UID=$$(id -u))"
+	@echo "ok: .env pronto"
 
 prepare-runtime:
 	@test -f .env || $(MAKE) --no-print-directory setup
@@ -24,10 +28,7 @@ prepare-runtime:
 	@install -d -m 700 database-internals database-internals/contexto database-internals/kv
 
 model: ## baixa o GGUF do Qwen3-8B (MODEL_REPO/MODEL_FILE) para ./models
-	@mkdir -p models
-	@test -f models/$(MODEL_FILE) && echo "já existe: models/$(MODEL_FILE)" || \
-	 (curl -L --fail --retry 5 --retry-delay 5 -C - -o models/$(MODEL_FILE).part \
-	   "https://huggingface.co/$(MODEL_REPO)/resolve/main/$(MODEL_FILE)" && mv models/$(MODEL_FILE).part models/$(MODEL_FILE))
+	@bash scripts/baixar_modelo.sh
 
 modelo-embeddings: ## baixa e verifica o Qwen3-Embedding 0.6B para busca semântica local
 	@mkdir -p models
@@ -43,7 +44,10 @@ modelo-embeddings: ## baixa e verifica o Qwen3-Embedding 0.6B para busca semânt
 	 chmod 0644 "$$parcial"; \
 	 mv -- "$$parcial" "$$modelo"
 
-run: prepare-runtime ## sobe tudo em primeiro plano, com os logs na tela; Ctrl+C derruba tudo
+check-runtime: prepare-runtime
+	@bash scripts/preparar_execucao.sh conferir "$(MAKE_EXECUTABLE)" $(COMPOSE)
+
+run: check-runtime ## sobe tudo em primeiro plano, com os logs na tela; Ctrl+C derruba tudo
 	@echo "==> subindo a stack; o playground aguarda os serviços e o SQLite. Ctrl+C derruba tudo."
 	@parar() { \
 	   if [ -n "$$($(COMPOSE) --profile llamacpp --profile max ps -q)" ]; then \
@@ -52,9 +56,9 @@ run: prepare-runtime ## sobe tudo em primeiro plano, com os logs na tela; Ctrl+C
 	   echo "==> stack parada"; \
 	 }; \
 	 trap parar EXIT; trap 'exit 0' INT TERM HUP; \
-	 $(COMPOSE) up --build --force-recreate --menu=false
+	 COMPOSE_MENU=false $(COMPOSE) up --build --force-recreate
 
-up: prepare-runtime ## sobe tudo em segundo plano, para scripts (use make down para parar)
+up: check-runtime ## sobe tudo em segundo plano, para scripts (use make down para parar)
 	$(COMPOSE) up --build --wait
 	@$(MAKE) --no-print-directory status
 

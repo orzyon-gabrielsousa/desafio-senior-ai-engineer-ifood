@@ -112,16 +112,25 @@ O SQLite da consultoria guarda estoque, cozinha, escolhas, fichas, análises e r
 
 ## Rodando
 
-Requisitos: Docker + Compose v2, driver NVIDIA ≥ 580 com NVIDIA Container Toolkit, GPU com 16 GB (ou ajuste o modelo), ~8 GB de disco para imagens e 5 GB para o modelo. Testado em Linux, RTX 5070 Ti, driver 595.
+O ambiente validado é **Linux com GPU NVIDIA**. Prepare estes itens no computador:
+
+- GNU Make, Bash, `curl`, `sha256sum` e `flock`. Em Debian/Ubuntu, os pacotes são `make bash curl coreutils util-linux`.
+- Docker em execução e acessível pelo seu usuário, com Compose v2.28 ou posterior e Buildx. [Instalar Docker Engine](https://docs.docker.com/engine/install/) · [Instalar Docker Compose](https://docs.docker.com/compose/install/)
+- Uma GPU NVIDIA acessível ao Docker, driver compatível com CUDA 13 (série 580 ou posterior) e NVIDIA Container Toolkit. A configuração padrão foi testada com uma RTX 5070 Ti de 16 GB. Reserve cerca de 15 GB para imagens e modelos e tenha conexão com a internet para os downloads e a busca de receitas. [Configurar NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+No Windows, o Docker Desktop oferece acesso à GPU NVIDIA com WSL2. Esse ambiente ainda precisa de validação com o projeto. A configuração CUDA atual requer NVIDIA e fica indisponível no macOS. [Suporte à GPU no Docker Desktop](https://docs.docker.com/desktop/features/gpu/)
+
+Na raiz da cópia do repositório:
 
 ```bash
-make setup     # cria .env (UID/GID do host) e pastas
-make model     # baixa Qwen3-8B-Q4_K_M.gguf (5 GB) para ./models
-make run       # sobe inferência (GPU), SearXNG, Hermes, a API do carrinho e o playground; Ctrl+C derruba tudo
+make install   # prepara configuração, imagens, modelos, frontend e SQLite
+make run       # sobe os serviços; Ctrl+C encerra a execução
 # em outro terminal, com o make run no ar:
 make smoke     # smoke test ponta a ponta (tool calling, busca, plugin, resposta do agente)
 make chat      # TUI do Hermes com o playbook pré-carregado
 ```
+
+O `make install` verifica a GPU pelo Docker, baixa o Qwen3-8B (5,0 GB) e o modelo de embeddings (cerca de 640 MB), compila o playground e importa a despensa inicial da planilha para o SQLite. Python, Node.js e as bibliotecas vêm das imagens. O instalador reaproveita arquivos e dados existentes. Execute `make run` nas próximas sessões.
 
 **Nada sobe com o sistema.** A stack vive só enquanto o `make run` está rodando: todos os serviços têm `restart: "no"` (o Docker sobe no boot, mas só religa container com `always` ou `unless-stopped`), Ctrl+C no terminal derruba tudo e fechar a aba do terminal também. Se um serviço cair, nada o religa sozinho: Ctrl+C e `make run` de novo. Para subir em segundo plano (scripts), `make up`; para derrubar, `make down`.
 
@@ -152,7 +161,7 @@ Na subida, o `make run` cria as pastas de runtime e recria os contêineres para 
 ├── prompts/base-de-conhecimento/cozinha-e-equipamentos/ fichas: pratos.md (o que cada prato precisa e custo típico de exemplo) · ingredientes.md · README
 
 ├── .env.example              portas, modelo, UID/GID, chave do API server
-├── Makefile                  setup · model · up · smoke · chat · test · validate · reset-dados
+├── Makefile                  install · run · up · smoke · chat · test · validate · reset-dados
 ├── data/despensa_dona_maria.xlsx   entrada do desafio (montada só-leitura no container)
 ├── hermes-home/              = $HERMES_HOME do container (só a customização é versionada)
 │   ├── config.yaml           modelo local, web backends, toolsets enxutos, plugin habilitado
